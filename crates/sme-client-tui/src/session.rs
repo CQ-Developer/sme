@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use sme_client_core::{Action, Client, CoreError, MessageBuffer, ReceivedMessage};
 use sme_client_net::{NetError, Transport};
 use sme_client_store::{Keystore, LocalConfig, StoreError};
-use sme_proto::{AccountId, ErrorCode};
+use sme_proto::{AccountId, ErrorCode, MessageBody};
 
 /// Number of one-time prekeys per upload.
 pub const PREKEY_BATCH: usize = 5;
@@ -70,6 +70,17 @@ impl From<NetError> for SessionError {
     }
 }
 
+/// What kind of message arrived; the full body stays in the core buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceivedKind {
+    Text(String),
+    Image {
+        width: u32,
+        height: u32,
+        bytes: usize,
+    },
+}
+
 /// Events for the UI; `text` is a string copy at the UI boundary (not fully wipeable, see plan.md §11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -78,7 +89,7 @@ pub enum Event {
     PreKeysUploaded { stored: u16 },
     SessionEstablished { peer: AccountId },
     Sent { msg_id: String },
-    Received { from: AccountId, text: String },
+    Received { from: AccountId, kind: ReceivedKind },
     DecryptFailed { from: AccountId },
     ServerError { code: ErrorCode, detail: String },
     ProtocolError { detail: &'static str },
@@ -196,10 +207,25 @@ impl Session {
         }
     }
 
-    pub async fn send_text(&mut self, peer: AccountId, text: &[u8]) -> Result<(), SessionError> {
+    pub async fn send_text(&mut self, peer: AccountId, text: &str) -> Result<(), SessionError> {
         let actions = self
             .client
             .send_text(peer, text)
+            .map_err(SessionError::Core)?;
+        let events = self.run_actions(actions).await?;
+        self.events.extend(events);
+        Ok(())
+    }
+
+    /// Send an arbitrary body (text or prepared image).
+    pub async fn send_body(
+        &mut self,
+        peer: AccountId,
+        body: &MessageBody,
+    ) -> Result<(), SessionError> {
+        let actions = self
+            .client
+            .send_body(peer, body)
             .map_err(SessionError::Core)?;
         let events = self.run_actions(actions).await?;
         self.events.extend(events);
@@ -268,11 +294,20 @@ fn to_event(action: Action) -> Event {
         Action::PreKeysUploaded { stored } => Event::PreKeysUploaded { stored },
         Action::SessionEstablished { peer } => Event::SessionEstablished { peer },
         Action::Sent { msg_id } => Event::Sent { msg_id },
-        Action::Received {
-            from, plaintext, ..
-        } => Event::Received {
+        Action::Received { from, body, .. } => Event::Received {
             from,
-            text: String::from_utf8_lossy(&plaintext).into_owned(),
+            kind: match body {
+                MessageBody::Text { text } => ReceivedKind::Text(text),
+                MessageBody::Image {
+                    width,
+                    height,
+                    bytes,
+                } => ReceivedKind::Image {
+                    width,
+                    height,
+                    bytes: bytes.len(),
+                },
+            },
         },
         Action::DecryptFailed { from, .. } => Event::DecryptFailed { from },
         Action::ServerError { code, detail } => Event::ServerError { code, detail },

@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use sme_proto::{
-    AccountId, Envelope, ErrorCode, Frame, KdfParams, OlmMessageKind, PROTOCOL_VERSION,
-    PreKeyUpload, Registration, Signature, login_payload,
+    AccountId, Envelope, ErrorCode, Frame, KdfParams, MessageBody, OlmMessageKind,
+    PROTOCOL_VERSION, PreKeyUpload, Registration, Signature, login_payload,
 };
 use vodozemac::Curve25519PublicKey;
 use vodozemac::olm::{
@@ -23,18 +23,29 @@ use crate::MessageBuffer;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedMessage {
     pub from: AccountId,
-    pub plaintext: Zeroizing<Vec<u8>>,
+    pub body: MessageBody,
 }
 
 impl ReceivedMessage {
-    pub fn plaintext(&self) -> &[u8] {
-        &self.plaintext
+    pub fn body(&self) -> &MessageBody {
+        &self.body
+    }
+
+    /// Text contents, when this message is text.
+    pub fn text(&self) -> Option<&str> {
+        match &self.body {
+            MessageBody::Text { text } => Some(text),
+            MessageBody::Image { .. } => None,
+        }
     }
 }
 
 impl Drop for ReceivedMessage {
     fn drop(&mut self) {
-        self.plaintext.zeroize();
+        match &mut self.body {
+            MessageBody::Text { text } => text.zeroize(),
+            MessageBody::Image { bytes, .. } => bytes.zeroize(),
+        }
     }
 }
 
@@ -45,11 +56,11 @@ impl ZeroizeOnDrop for ReceivedMessage {}
 pub enum Action {
     /// Send immediately through `sme-client-net`.
     Send(Frame),
-    /// Newly decrypted plaintext (already in the in-memory buffer).
+    /// Newly decrypted message (already in the in-memory buffer).
     Received {
         msg_id: String,
         from: AccountId,
-        plaintext: Zeroizing<Vec<u8>>,
+        body: MessageBody,
     },
     /// Decryption failed (e.g. duplicate delivery); D-acked but not shown.
     DecryptFailed {
@@ -86,6 +97,7 @@ pub enum Action {
 pub enum CoreError {
     NoSession(AccountId),
     BadEnvelope(&'static str),
+    BadBody,
     SessionCreation(vodozemac::olm::SessionCreationError),
     Encryption(vodozemac::olm::EncryptionError),
     Decryption(vodozemac::olm::DecryptionError),
@@ -96,6 +108,7 @@ impl std::fmt::Display for CoreError {
         match self {
             Self::NoSession(account) => write!(f, "no established olm session with {account}"),
             Self::BadEnvelope(reason) => write!(f, "bad envelope: {reason}"),
+            Self::BadBody => write!(f, "message body is invalid or too large"),
             Self::SessionCreation(error) => write!(f, "olm session creation failed: {error}"),
             Self::Encryption(error) => write!(f, "olm encryption failed: {error}"),
             Self::Decryption(error) => write!(f, "olm decryption failed: {error}"),
@@ -210,16 +223,24 @@ impl Client {
     }
 
     /// Encrypt a text/byte message with the existing session.
-    pub fn send_text(
+    /// Encrypt a text message with the existing session.
+    pub fn send_text(&mut self, peer: AccountId, text: &str) -> Result<Vec<Action>, CoreError> {
+        let body = MessageBody::text(text).map_err(|_| CoreError::BadBody)?;
+        self.send_body(peer, &body)
+    }
+
+    /// Encrypt a message body (text or image) with the existing session.
+    pub fn send_body(
         &mut self,
         peer: AccountId,
-        plaintext: &[u8],
+        body: &MessageBody,
     ) -> Result<Vec<Action>, CoreError> {
+        let plaintext = body.encode().map_err(|_| CoreError::BadBody)?;
         let session = self
             .sessions
             .get_mut(&peer)
             .ok_or(CoreError::NoSession(peer))?;
-        let message = session.encrypt(plaintext).map_err(CoreError::Encryption)?;
+        let message = session.encrypt(&plaintext).map_err(CoreError::Encryption)?;
 
         let (kind, payload) = match message {
             OlmMessage::PreKey(message) => (OlmMessageKind::PreKey, message.to_bytes()),
@@ -291,18 +312,17 @@ impl Client {
     fn handle_deliver(&mut self, msg_id: String, envelope: Envelope) -> Vec<Action> {
         let from = envelope.from;
         match self.decrypt(&envelope) {
-            Ok((plaintext, session_changed)) => {
-                let plaintext = Zeroizing::new(plaintext);
+            Ok((body, session_changed)) => {
                 self.buffer.push(ReceivedMessage {
                     from,
-                    plaintext: plaintext.clone(),
+                    body: body.clone(),
                 });
 
                 let mut actions = vec![
                     Action::Received {
                         msg_id: msg_id.clone(),
                         from,
-                        plaintext,
+                        body,
                     },
                     Action::Send(Frame::DeliverAck { msg_id }),
                 ];
@@ -322,8 +342,18 @@ impl Client {
         }
     }
 
-    /// Decrypt one envelope; returns `(plaintext, local state changed)`.
-    fn decrypt(&mut self, envelope: &Envelope) -> Result<(Vec<u8>, bool), CoreError> {
+    /// Decrypt one envelope; returns `(body, local state changed)`.
+    fn decrypt(&mut self, envelope: &Envelope) -> Result<(MessageBody, bool), CoreError> {
+        let (plaintext, session_changed) = self.decrypt_plaintext(envelope)?;
+        let body = MessageBody::decode(&plaintext).map_err(|_| CoreError::BadBody)?;
+        Ok((body, session_changed))
+    }
+
+    /// Decrypt one envelope to raw plaintext bytes; returns `(plaintext, local state changed)`.
+    fn decrypt_plaintext(
+        &mut self,
+        envelope: &Envelope,
+    ) -> Result<(Zeroizing<Vec<u8>>, bool), CoreError> {
         if envelope.to != self.account_id {
             return Err(CoreError::BadEnvelope(
                 "envelope addressed to another account",
@@ -338,7 +368,7 @@ impl Client {
                     && let Ok(message) = PreKeyMessage::from_bytes(&envelope.payload)
                     && let Ok(plaintext) = session.decrypt(&OlmMessage::PreKey(message))
                 {
-                    return Ok((plaintext, true));
+                    return Ok((Zeroizing::new(plaintext), true));
                 }
 
                 let pre_key = PreKeyMessage::from_bytes(&envelope.payload)
@@ -349,7 +379,7 @@ impl Client {
                     .create_inbound_session(SessionConfig::default(), identity_key, &pre_key)
                     .map_err(CoreError::SessionCreation)?;
                 self.sessions.insert(from, inbound.session);
-                Ok((inbound.plaintext, true))
+                Ok((Zeroizing::new(inbound.plaintext), true))
             }
 
             OlmMessageKind::Normal => {
@@ -362,7 +392,7 @@ impl Client {
                 let plaintext = session
                     .decrypt(&OlmMessage::Normal(message))
                     .map_err(CoreError::Decryption)?;
-                Ok((plaintext, true))
+                Ok((Zeroizing::new(plaintext), true))
             }
         }
     }

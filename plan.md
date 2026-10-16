@@ -16,6 +16,7 @@
 > - v0.12：M4 完成——ratatui 参考客户端（仅文本：`/peer` 选对端、Ctrl+X 紧急擦除、空闲锁定）；消息缓冲与会话全链路 `Zeroize`；I4（应用目录金丝雀扫描）与 I6（类型级 zeroize 契约 + wipe 语义）测试；新增 `LocalConfig`。
 > - v0.13：产品调整——桌面三平台统一 TUI（D4a′ 修订，取消 egui/iced 路线；M6 改为平台适配）；代码注释全部改为英文。
 > - v0.14：确认终端图片能力——桌面 TUI 用 `ratatui-image` 支持 Kitty / Sixel / iTerm2 内联图片预览，回退 unicode halfblocks，并提供「另存为」（D26）；运行时字符串（含 TUI 文案）全部改英文。
+> - v0.15：M5 进行中——图文消息正文（`MessageBody`，仅在 Olm 明文内，服务端不可见）与 `sme-media` 图片链路（格式白名单 / 解压炸弹防御 / EXIF 方向 / 长边 2048 / JPEG q80-70-60 / ≤1MB）完成，I12 通过；TUI 图片内联预览与「另存为」在 M6 接入。
 
 ## 1. 产品定位（一句话）
 

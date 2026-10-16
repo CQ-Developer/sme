@@ -3,7 +3,7 @@
 //! No IO at all (I2 gate); server interaction is covered by `sme-server` integration tests.
 
 use sme_client_core::{Action, Client, CoreError, MESSAGE_BUFFER_LIMIT};
-use sme_proto::{AccountId, Frame, OlmMessageKind, PreKeyBundle};
+use sme_proto::{AccountId, Frame, MessageBody, OlmMessageKind, PreKeyBundle};
 use vodozemac::olm::Account;
 
 fn client_pair() -> (Client, Client, AccountId, AccountId) {
@@ -53,7 +53,7 @@ fn handshake_and_bidirectional_messages() {
     establish(&mut alice, &mut bob, bob_id);
 
     // Alice → Bob
-    let Frame::Send(envelope) = first_send(alice.send_text(bob_id, b"hello bob").unwrap()) else {
+    let Frame::Send(envelope) = first_send(alice.send_text(bob_id, "hello bob").unwrap()) else {
         panic!("expected Send");
     };
     assert_eq!(envelope.kind, OlmMessageKind::PreKey);
@@ -64,12 +64,12 @@ fn handshake_and_bidirectional_messages() {
         envelope,
     });
     assert!(actions.iter().any(
-        |action| matches!(action, Action::Received { plaintext, .. } if plaintext.as_slice() == b"hello bob")
+        |action| matches!(action, Action::Received { body: MessageBody::Text { text }, .. } if text == "hello bob")
     ));
     assert_eq!(bob.buffer().len(), 1);
 
     // Bob -> Alice (Bob already built the inbound session from the pre-key message)
-    let Frame::Send(envelope) = first_send(bob.send_text(alice_id, b"hi alice").unwrap()) else {
+    let Frame::Send(envelope) = first_send(bob.send_text(alice_id, "hi alice").unwrap()) else {
         panic!("expected Send");
     };
     assert_eq!(envelope.kind, OlmMessageKind::Normal);
@@ -79,7 +79,7 @@ fn handshake_and_bidirectional_messages() {
         envelope,
     });
     assert!(actions.iter().any(
-        |action| matches!(action, Action::Received { plaintext, .. } if plaintext.as_slice() == b"hi alice")
+        |action| matches!(action, Action::Received { body: MessageBody::Text { text }, .. } if text == "hi alice")
     ));
     assert_eq!(alice.buffer().len(), 1);
 }
@@ -89,7 +89,7 @@ fn duplicate_delivery_is_acked_but_not_shown() {
     let (mut alice, mut bob, _alice_id, bob_id) = client_pair();
     establish(&mut alice, &mut bob, bob_id);
 
-    let Frame::Send(envelope) = first_send(alice.send_text(bob_id, b"only once").unwrap()) else {
+    let Frame::Send(envelope) = first_send(alice.send_text(bob_id, "only once").unwrap()) else {
         panic!("expected Send");
     };
 
@@ -128,8 +128,7 @@ fn buffer_drops_the_oldest_messages() {
     establish(&mut alice, &mut bob, bob_id);
 
     for i in 0..(MESSAGE_BUFFER_LIMIT + 5) {
-        let Frame::Send(envelope) =
-            first_send(alice.send_text(bob_id, format!("m{i}").as_bytes()).unwrap())
+        let Frame::Send(envelope) = first_send(alice.send_text(bob_id, &format!("m{i}")).unwrap())
         else {
             panic!("expected Send");
         };
@@ -140,17 +139,17 @@ fn buffer_drops_the_oldest_messages() {
     }
 
     assert_eq!(bob.buffer().len(), MESSAGE_BUFFER_LIMIT);
-    assert_eq!(bob.buffer().oldest().unwrap().plaintext(), b"m5");
+    assert_eq!(bob.buffer().oldest().unwrap().text(), Some("m5"));
     assert_eq!(
-        bob.buffer().newest().unwrap().plaintext(),
-        format!("m{}", MESSAGE_BUFFER_LIMIT + 4).as_bytes()
+        bob.buffer().newest().unwrap().text(),
+        Some(format!("m{}", MESSAGE_BUFFER_LIMIT + 4).as_str())
     );
 }
 
 #[test]
 fn sending_without_a_session_fails() {
     let (mut alice, _bob, _alice_id, bob_id) = client_pair();
-    let error = alice.send_text(bob_id, b"too early").unwrap_err();
+    let error = alice.send_text(bob_id, "too early").unwrap_err();
     assert!(matches!(error, CoreError::NoSession(peer) if peer == bob_id));
 }
 
@@ -159,7 +158,7 @@ fn wipe_clears_messages_and_sessions() {
     let (mut alice, mut bob, alice_id, bob_id) = client_pair();
     establish(&mut alice, &mut bob, bob_id);
 
-    let Frame::Send(envelope) = first_send(alice.send_text(bob_id, b"wipe me").unwrap()) else {
+    let Frame::Send(envelope) = first_send(alice.send_text(bob_id, "wipe me").unwrap()) else {
         panic!("expected Send");
     };
     bob.handle_frame(Frame::Deliver {
@@ -171,7 +170,7 @@ fn wipe_clears_messages_and_sessions() {
     bob.wipe();
     assert!(bob.buffer().is_empty());
     assert!(
-        matches!(bob.send_text(alice_id, b"again").unwrap_err(), CoreError::NoSession(peer) if peer == alice_id)
+        matches!(bob.send_text(alice_id, "again").unwrap_err(), CoreError::NoSession(peer) if peer == alice_id)
     );
 }
 
@@ -180,7 +179,7 @@ fn envelope_addressed_to_someone_else_is_ignored() {
     let (mut alice, mut bob, _alice_id, bob_id) = client_pair();
     establish(&mut alice, &mut bob, bob_id);
 
-    let Frame::Send(mut envelope) = first_send(alice.send_text(bob_id, b"not for carol").unwrap())
+    let Frame::Send(mut envelope) = first_send(alice.send_text(bob_id, "not for carol").unwrap())
     else {
         panic!("expected Send");
     };

@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use sme_client_tui::session::{Event, Session};
+use sme_client_tui::session::{Event, ReceivedKind, Session};
 use sme_server::valkey::{Valkey, random_instance_id};
 use sme_server::{app, state::AppState};
 use sme_test_support::{TestDir, ValkeyContainer};
@@ -125,33 +125,37 @@ async fn two_clients_chat_and_resume_after_restart() {
 
     // ---- Alice → Bob ----
     let plaintext = "CANARY-e2e-7f3a: hello bob over the wire";
-    alice.send_text(bob_id, plaintext.as_bytes()).await.unwrap();
-    let Event::Received { text, .. } =
-        next_until(&mut bob, |event| matches!(event, Event::Received { .. })).await
+    alice.send_text(bob_id, plaintext).await.unwrap();
+    let Event::Received {
+        kind: ReceivedKind::Text(text),
+        ..
+    } = next_until(&mut bob, |event| matches!(event, Event::Received { .. })).await
     else {
         panic!("expected Received");
     };
     assert_eq!(text, plaintext);
 
     // ---- Bob → Alice ----
-    bob.send_text(alice_id, b"reply from bob").await.unwrap();
+    bob.send_text(alice_id, "reply from bob").await.unwrap();
     next_until(
         &mut alice,
-        |event| matches!(event, Event::Received { text, .. } if text == "reply from bob"),
+        |event| matches!(event, Event::Received { kind: ReceivedKind::Text(text), .. } if text == "reply from bob"),
     )
     .await;
 
     // ---- Alice goes offline; Bob's message lands in the server queue ----
     let offline = "CANARY-e2e-7f3a: while you were away";
     drop(alice);
-    bob.send_text(alice_id, offline.as_bytes()).await.unwrap();
+    bob.send_text(alice_id, offline).await.unwrap();
 
     // ---- Alice restarts from the keystore, restores the session and fetches the queued message ----
     let mut alice = Session::connect(&url, &alice_path, PASSWORD)
         .await
         .expect("alice reconnects");
-    let Event::Received { text, .. } =
-        next_until(&mut alice, |event| matches!(event, Event::Received { .. })).await
+    let Event::Received {
+        kind: ReceivedKind::Text(text),
+        ..
+    } = next_until(&mut alice, |event| matches!(event, Event::Received { .. })).await
     else {
         panic!("expected offline message");
     };
@@ -159,12 +163,12 @@ async fn two_clients_chat_and_resume_after_restart() {
 
     // ---- The restored Alice keeps sending ----
     alice
-        .send_text(bob_id, b"still here after restart")
+        .send_text(bob_id, "still here after restart")
         .await
         .unwrap();
     next_until(
         &mut bob,
-        |event| matches!(event, Event::Received { text, .. } if text == "still here after restart"),
+        |event| matches!(event, Event::Received { kind: ReceivedKind::Text(text), .. } if text == "still here after restart"),
     )
     .await;
 

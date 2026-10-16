@@ -21,7 +21,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use sme_client_tui::session::{Event, Session};
+use sme_client_tui::session::{Event, ReceivedKind, Session};
 use sme_proto::AccountId;
 use zeroize::Zeroizing;
 
@@ -214,7 +214,7 @@ async fn send_input(app: &mut App) {
     let Some(session) = app.session.as_mut() else {
         return;
     };
-    match session.send_text(peer, text.as_bytes()).await {
+    match session.send_text(peer, &text).await {
         Ok(()) => push_message(app, "me".to_string(), text),
         Err(error) => app.status = format!("Send failed: {error}"),
     }
@@ -222,7 +222,18 @@ async fn send_input(app: &mut App) {
 
 fn apply_event(app: &mut App, event: Event) {
     match event {
-        Event::Received { from, text } => push_message(app, from.to_string(), text),
+        Event::Received { from, kind } => match kind {
+            ReceivedKind::Text(text) => push_message(app, from.to_string(), text),
+            ReceivedKind::Image {
+                width,
+                height,
+                bytes,
+            } => push_message(
+                app,
+                from.to_string(),
+                format!("[image {width}x{height}, {bytes} bytes]"),
+            ),
+        },
         Event::DecryptFailed { from } => {
             app.status = format!("Dropped a duplicate/undecryptable message (from {from})");
         }
