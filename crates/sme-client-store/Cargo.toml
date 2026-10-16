@@ -7,5 +7,6 @@ rust-version.workspace = true
 [dependencies]
 postcard = { workspace = true }
 sme-crypto = { path = "../sme-crypto" }
+sme-proto = { path = "../sme-proto" }
 vodozemac = { workspace = true }
 zeroize = { workspace = true }

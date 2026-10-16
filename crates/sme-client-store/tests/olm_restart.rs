@@ -7,6 +7,7 @@ mod common;
 
 use common::TestDir;
 use sme_client_store::Keystore;
+use sme_proto::AccountId;
 use vodozemac::olm::{Account, OlmMessage, Session, SessionConfig};
 
 const PASSWORD: &[u8] = b"correct horse battery staple";
@@ -53,10 +54,11 @@ fn account_and_session_survive_restart() {
     let (alice, _bob, alice_session, mut bob_session) = establish_sessions();
     let identity_before = alice.identity_keys();
     let session_id = alice_session.session_id();
+    let peer = AccountId::random();
 
     let mut keystore = Keystore::create(&path, PASSWORD).unwrap();
     keystore.save_account(&alice).unwrap();
-    keystore.save_session(&alice_session).unwrap();
+    keystore.save_session(peer, &alice_session).unwrap();
     keystore.save().unwrap();
 
     // 模拟重启：内存里的 Alice 全部丢弃，只从磁盘重新打开。
@@ -67,11 +69,10 @@ fn account_and_session_survive_restart() {
     let alice_restored = keystore.load_account().unwrap().expect("账号必须能恢复");
     assert_eq!(alice_restored.identity_keys(), identity_before);
 
-    assert_eq!(keystore.session_ids(), vec![session_id.clone()]);
-    let mut alice_session_restored = keystore
-        .load_session(&session_id)
-        .unwrap()
-        .expect("会话必须能恢复");
+    let sessions = keystore.load_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    let (restored_peer, mut alice_session_restored) = sessions.into_iter().next().unwrap();
+    assert_eq!(restored_peer, peer);
     assert_eq!(alice_session_restored.session_id(), session_id);
 
     // 棘轮连续性：Bob 用重启前的会话发消息，恢复后的 Alice 必须能解开。
@@ -101,6 +102,5 @@ fn empty_keystore_has_no_account_or_sessions() {
 
     let keystore = Keystore::open(&path, PASSWORD).unwrap();
     assert!(keystore.load_account().unwrap().is_none());
-    assert!(keystore.load_session("does-not-exist").unwrap().is_none());
-    assert!(keystore.session_ids().is_empty());
+    assert!(keystore.load_sessions().unwrap().is_empty());
 }

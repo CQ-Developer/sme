@@ -1,0 +1,175 @@
+//! 核心状态机的纯离线测试：握手、双向收发、重复投递与缓冲上限。
+//!
+//! 不涉及任何 IO（I2 门禁），服务端交互由 `sme-server` 的集成测试覆盖。
+
+use sme_client_core::{Action, Client, CoreError, MESSAGE_BUFFER_LIMIT};
+use sme_proto::{AccountId, Frame, OlmMessageKind, PreKeyBundle};
+use vodozemac::olm::Account;
+
+fn client_pair() -> (Client, Client, AccountId, AccountId) {
+    let alice_id = AccountId::random();
+    let bob_id = AccountId::random();
+    let alice = Client::new(alice_id, Account::new());
+    let bob = Client::new(bob_id, Account::new());
+    (alice, bob, alice_id, bob_id)
+}
+
+/// Bob 生成预密钥并交给 Alice 建立出站会话。
+fn establish(alice: &mut Client, bob: &mut Client, bob_id: AccountId) {
+    let actions = bob.prekey_upload(5);
+    let Frame::UploadPreKeys { prekeys } = first_send(actions) else {
+        panic!("expected UploadPreKeys");
+    };
+
+    let bob_identity = bob.account().identity_keys();
+    let bundle = PreKeyBundle {
+        account_id: bob_id,
+        ed25519_pub: *bob_identity.ed25519.as_bytes(),
+        curve25519_pub: *bob_identity.curve25519.as_bytes(),
+        one_time_key_id: prekeys[0].key_id.clone(),
+        one_time_key: prekeys[0].public_key,
+    };
+    let actions = alice.handle_frame(Frame::PreKeyBundle(bundle));
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, Action::Persist))
+    );
+}
+
+fn first_send(actions: Vec<Action>) -> Frame {
+    actions
+        .into_iter()
+        .find_map(|action| match action {
+            Action::Send(frame) => Some(frame),
+            _ => None,
+        })
+        .expect("expected an outgoing frame")
+}
+
+#[test]
+fn handshake_and_bidirectional_messages() {
+    let (mut alice, mut bob, alice_id, bob_id) = client_pair();
+    establish(&mut alice, &mut bob, bob_id);
+
+    // Alice → Bob
+    let Frame::Send(envelope) = first_send(alice.send_text(bob_id, b"hello bob").unwrap()) else {
+        panic!("expected Send");
+    };
+    assert_eq!(envelope.kind, OlmMessageKind::PreKey);
+    assert_eq!(envelope.to, bob_id);
+
+    let actions = bob.handle_frame(Frame::Deliver {
+        msg_id: 1,
+        envelope,
+    });
+    assert!(actions.iter().any(
+        |action| matches!(action, Action::Received { plaintext, .. } if plaintext == b"hello bob")
+    ));
+    assert_eq!(bob.buffer().len(), 1);
+
+    // Bob → Alice（Bob 已从 pre-key 消息建立入站会话）
+    let Frame::Send(envelope) = first_send(bob.send_text(alice_id, b"hi alice").unwrap()) else {
+        panic!("expected Send");
+    };
+    assert_eq!(envelope.kind, OlmMessageKind::Normal);
+
+    let actions = alice.handle_frame(Frame::Deliver {
+        msg_id: 2,
+        envelope,
+    });
+    assert!(actions.iter().any(
+        |action| matches!(action, Action::Received { plaintext, .. } if plaintext == b"hi alice")
+    ));
+    assert_eq!(alice.buffer().len(), 1);
+}
+
+#[test]
+fn duplicate_delivery_is_acked_but_not_shown() {
+    let (mut alice, mut bob, _alice_id, bob_id) = client_pair();
+    establish(&mut alice, &mut bob, bob_id);
+
+    let Frame::Send(envelope) = first_send(alice.send_text(bob_id, b"only once").unwrap()) else {
+        panic!("expected Send");
+    };
+
+    let first = bob.handle_frame(Frame::Deliver {
+        msg_id: 7,
+        envelope: envelope.clone(),
+    });
+    assert!(
+        first
+            .iter()
+            .any(|action| matches!(action, Action::Received { .. }))
+    );
+
+    let second = bob.handle_frame(Frame::Deliver {
+        msg_id: 7,
+        envelope,
+    });
+    assert!(
+        second
+            .iter()
+            .any(|action| matches!(action, Action::DecryptFailed { .. }))
+    );
+    assert!(
+        second
+            .iter()
+            .any(|action| matches!(action, Action::Send(Frame::DeliverAck { msg_id: 7 })))
+    );
+    assert_eq!(bob.buffer().len(), 1, "重复投递不得重复显示");
+}
+
+#[test]
+fn buffer_drops_the_oldest_messages() {
+    let (mut alice, mut bob, _alice_id, bob_id) = client_pair();
+    establish(&mut alice, &mut bob, bob_id);
+
+    for i in 0..(MESSAGE_BUFFER_LIMIT + 5) {
+        let Frame::Send(envelope) =
+            first_send(alice.send_text(bob_id, format!("m{i}").as_bytes()).unwrap())
+        else {
+            panic!("expected Send");
+        };
+        bob.handle_frame(Frame::Deliver {
+            msg_id: i as u64,
+            envelope,
+        });
+    }
+
+    assert_eq!(bob.buffer().len(), MESSAGE_BUFFER_LIMIT);
+    assert_eq!(bob.buffer().oldest().unwrap().plaintext, b"m5".to_vec());
+    assert_eq!(
+        bob.buffer().newest().unwrap().plaintext,
+        format!("m{}", MESSAGE_BUFFER_LIMIT + 4).as_bytes().to_vec()
+    );
+}
+
+#[test]
+fn sending_without_a_session_fails() {
+    let (mut alice, _bob, _alice_id, bob_id) = client_pair();
+    let error = alice.send_text(bob_id, b"too early").unwrap_err();
+    assert!(matches!(error, CoreError::NoSession(peer) if peer == bob_id));
+}
+
+#[test]
+fn envelope_addressed_to_someone_else_is_ignored() {
+    let (mut alice, mut bob, _alice_id, bob_id) = client_pair();
+    establish(&mut alice, &mut bob, bob_id);
+
+    let Frame::Send(mut envelope) = first_send(alice.send_text(bob_id, b"not for carol").unwrap())
+    else {
+        panic!("expected Send");
+    };
+    envelope.to = AccountId::random();
+    let actions = bob.handle_frame(Frame::Deliver {
+        msg_id: 9,
+        envelope,
+    });
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, Action::DecryptFailed { .. }))
+    );
+    assert_eq!(bob.buffer().len(), 0);
+}

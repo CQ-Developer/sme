@@ -1,9 +1,15 @@
 //! 会话管理、Olm 会话持有、重放窗口与内存消息缓冲（plan.md §5、§8）。
 //!
-//! 本 crate 禁止任何文件 / 网络 / 进程 API（I2 门禁）。
+//! 本 crate 禁止任何文件 / 网络 / 进程 API（I2 门禁）：[`Client`] 只进出
+//! [`sme_proto::Frame`] 与 [`Action`]，由调用方负责传输（`sme-client-net`）
+//! 与持久化（`sme-client-store`）。
 //! 明文消息只存在于 [`MessageBuffer`] 中，上限 [`MESSAGE_BUFFER_LIMIT`] 条，永不落盘（I3、I11）。
 
+mod client;
+
 use std::collections::VecDeque;
+
+pub use client::{Action, Client, CoreError, ReceivedMessage};
 
 /// 内存中保留的明文消息条数上限（plan.md §8）。
 pub const MESSAGE_BUFFER_LIMIT: usize = 10;

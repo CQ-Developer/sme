@@ -11,6 +11,7 @@
 > - v0.7：M0 落地（workspace 骨架 + 三条 CI 门禁 + compose/migration + I3/I11 测试）；新增 D23（keystore AEAD）与 D24（Argon2id 默认参数）。
 > - v0.8：M1 完成——Olm 账号与会话经 KEK 加密跨重启恢复（条目 `olm.account` / `olm.session.<id>`），Argon2id 通过官方参考实现的 KAT。
 > - v0.9：M2 起步——`sme-proto` 线路协议落地（账号 ID base32、控制帧 + Olm 信封、postcard 严格编解码）；查询方案选 A（D25），workspace MSRV 提到 1.94（sqlx 0.9 要求）。
+> - v0.10：M2 完成——axum 网关（注册 / 挑战-签名登录 / 预密钥 / 密文转发 / 离线队列 / D-ack）、客户端核心状态机（Olm 握手、加解密、内存缓冲、持久化信号）与 WebSocket 传输；端到端测试覆盖离线队列与跨重启棘轮恢复。
 
 ## 1. 产品定位（一句话）
 
@@ -280,7 +281,7 @@ Cargo workspace（Rust）
 
 ### 10.2 待定
 
-无待定项。M1 已完成（v0.8），下一步 M2。
+无待定项。M2 已完成（v0.10），下一步 M3。
 
 ## 11. 持久化策略（D11 / D13）
 
@@ -363,9 +364,10 @@ D2 修订后，会话状态可跨启动恢复，移动端进程被杀不再意�
    - `docs/THREAT_MODEL.md` — 威胁模型与残余风险
    - `docs/INFRA.md` — 基础设施规格（Postgres 18.6 / Valkey 9.1.2 / Caddy / 配额 / compose）
 2. M0 ✅（v0.7）：workspace 骨架、三条 CI 门禁（I1 字段名 / I2 核心禁词 / Valkey 禁持久化，均含注入自检）、compose + `accounts` migration、I3/I11 测试。
-3. M1 ✅（v0.8）：Olm 账号/会话跨重启恢复（`sme-client-store::save_account` / `load_account` / `save_session` / `load_session`，走 vodozemac 公开 pickle API），Argon2id KAT（含 p>1 向量）。
-4. 下一步进 M2：`sme-client-net` + 服务端 axum 网关，打通 1:1 实时聊天（信封 `sme-proto`、postcard、队列语义）。
-5. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
+3. M1 ✅（v0.8）：Olm 账号/会话跨重启恢复（`sme-client-store::save_account` / `load_account` / `save_session` / `load_sessions`，走 vodozemac 公开 pickle API），Argon2id KAT（含 p>1 向量）。
+4. M2 ✅（v0.10）：`sme-proto` 线路协议；axum 网关（注册 / 挑战-签名登录 / 预密钥 / 密文转发 / 内存队列 / D-ack / 单会话顶替）；`sme-client-core` 状态机与 `sme-client-net` WebSocket 传输；端到端测试覆盖离线队列与跨重启恢复。
+5. 下一步进 M3：无状态网关 + 共享易失队列（Valkey，TTL 24h、D-ack 即删、限流、presence、启动自检 I7），补齐 I1 / I5 / I7 / I8 测试。
+6. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
 
 ## 14. 附录：D4e 验证记录与本地环境
 

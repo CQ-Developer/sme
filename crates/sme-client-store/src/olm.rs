@@ -1,9 +1,13 @@
-//! Olm 账号与会话的持久化（M1）。
+//! Olm 账号与会话的持久化（M1 / M2）。
 //!
 //! 格式完全走 vodozemac 的公开 API：`AccountPickle::encrypt(kek)` /
 //! `SessionPickle::encrypt(kek)`，条目本身再由 keystore 的 AEAD 整体保护（D23）。
 //! 不依赖任何内部序列化格式。
+//!
+//! 会话条目名带对端账号（`olm.session.<peer>.<session_id>`）：vodozemac 的
+//! `Session` 不暴露对端，恢复时必须靠条目名归档。
 
+use sme_proto::AccountId;
 use vodozemac::olm::{Account, AccountPickle, Session, SessionPickle};
 
 use crate::{Keystore, StoreError};
@@ -11,7 +15,7 @@ use crate::{Keystore, StoreError};
 /// keystore 里账号 pickle 的条目名。
 pub const ACCOUNT_ENTRY: &str = "olm.account";
 
-/// keystore 里会话 pickle 的条目名前缀，后面接 `Session::session_id()`。
+/// keystore 里会话 pickle 的条目名前缀。
 pub const SESSION_ENTRY_PREFIX: &str = "olm.session.";
 
 impl Keystore {
@@ -33,34 +37,37 @@ impl Keystore {
         Ok(Some(Account::from(pickle)))
     }
 
-    /// 用 KEK 加密并保存一个 Olm 会话，条目名由 `session_id` 决定。
-    pub fn save_session(&mut self, session: &Session) -> Result<(), StoreError> {
+    /// 用 KEK 加密并保存一个 Olm 会话；同一个对端会覆盖旧会话。
+    pub fn save_session(&mut self, peer: AccountId, session: &Session) -> Result<(), StoreError> {
         let encrypted = session.pickle().encrypt(&self.kek);
-        self.put(session_entry(&session.session_id()), encrypted.into_bytes());
+        self.put(
+            session_entry(peer, &session.session_id()),
+            encrypted.into_bytes(),
+        );
         Ok(())
     }
 
-    /// 恢复指定会话；不存在时返回 `None`。
-    pub fn load_session(&self, session_id: &str) -> Result<Option<Session>, StoreError> {
-        let Some(ciphertext) = self.get(&session_entry(session_id)) else {
-            return Ok(None);
-        };
-        let ciphertext = std::str::from_utf8(ciphertext)
-            .map_err(|_| StoreError::Corrupt("olm session entry is not UTF-8"))?;
-        let pickle = SessionPickle::from_encrypted(ciphertext, &self.kek)?;
-        Ok(Some(Session::from(pickle)))
-    }
-
-    /// 已保存的全部会话 ID；重启后据此逐个恢复。
-    pub fn session_ids(&self) -> Vec<String> {
-        self.entries
-            .keys()
-            .filter_map(|key| key.strip_prefix(SESSION_ENTRY_PREFIX))
-            .map(str::to_owned)
-            .collect()
+    /// 恢复全部会话，带上各自的对端账号。
+    pub fn load_sessions(&self) -> Result<Vec<(AccountId, Session)>, StoreError> {
+        let mut sessions = Vec::new();
+        for (key, ciphertext) in &self.entries {
+            let Some(rest) = key.strip_prefix(SESSION_ENTRY_PREFIX) else {
+                continue;
+            };
+            let Some((peer, _session_id)) = rest.split_once('.') else {
+                return Err(StoreError::Corrupt("malformed olm session entry name"));
+            };
+            let peer = AccountId::parse_base32(peer)
+                .map_err(|_| StoreError::Corrupt("malformed olm session entry name"))?;
+            let ciphertext = std::str::from_utf8(ciphertext)
+                .map_err(|_| StoreError::Corrupt("olm session entry is not UTF-8"))?;
+            let pickle = SessionPickle::from_encrypted(ciphertext, &self.kek)?;
+            sessions.push((peer, Session::from(pickle)));
+        }
+        Ok(sessions)
     }
 }
 
-fn session_entry(session_id: &str) -> String {
-    format!("{SESSION_ENTRY_PREFIX}{session_id}")
+fn session_entry(peer: AccountId, session_id: &str) -> String {
+    format!("{SESSION_ENTRY_PREFIX}{peer}.{session_id}")
 }

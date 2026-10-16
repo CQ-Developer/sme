@@ -17,6 +17,15 @@ cargo test --workspace          # 含 I3（内存缓冲 ≤10 条）与 I11（ke
 python3 scripts/ci/run_gates.py # I1 字段名 / I2 核心禁词 / Valkey 禁持久化，含注入自检
 ```
 
+服务端与端到端集成测试需要真实 Postgres：
+
+```bash
+docker run --rm -d --name sme-pg-test \
+  -e POSTGRES_USER=sme -e POSTGRES_PASSWORD=sme -e POSTGRES_DB=sme \
+  -p 127.0.0.1:5433:5432 postgres:18.6-alpine
+DATABASE_URL=postgres://sme:sme@127.0.0.1:5433/sme cargo test --workspace
+```
+
 本地基础设施（需要 Docker）：
 
 ```bash

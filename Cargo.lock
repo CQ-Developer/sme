@@ -1629,10 +1629,20 @@ dependencies = [
 [[package]]
 name = "sme-client-core"
 version = "0.1.0"
+dependencies = [
+ "sme-proto",
+ "vodozemac",
+]
 
 [[package]]
 name = "sme-client-net"
 version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "sme-proto",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+]
 
 [[package]]
 name = "sme-client-store"
@@ -1640,6 +1650,7 @@ version = "0.1.0"
 dependencies = [
  "postcard",
  "sme-crypto",
+ "sme-proto",
  "vodozemac",
  "zeroize",
 ]
@@ -1647,6 +1658,17 @@ dependencies = [
 [[package]]
 name = "sme-client-tui"
 version = "0.1.0"
+dependencies = [
+ "axum",
+ "sme-client-core",
+ "sme-client-net",
+ "sme-client-store",
+ "sme-proto",
+ "sme-server",
+ "sqlx",
+ "tokio",
+ "vodozemac",
+]
 
 [[package]]
 name = "sme-crypto"

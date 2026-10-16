@@ -203,7 +203,7 @@ Caddy 侧要点：只暴露 `443`（`80` 仅用于 ACME 与跳转）；对 HTTP 
 | **图片** | 只存在于内存（≤10 条、≤8MB 预算）；**唯一落盘出口是用户显式「另存为」**，写到用户自己选择的位置，应用目录不缓存任何副本 |
 | 不引入 | SQLite、系统 Keychain / Keystore（KEK 来自口令）、任何磁盘缓存 |
 
-条目命名（M1 落地）：`olm.account`（账号 pickle）、`olm.session.<session_id>`（会话 pickle）；两者都以 KEK 经 `AccountPickle::encrypt` / `SessionPickle::encrypt` 加密后写入，再由 keystore 整体 AEAD 封装。
+条目命名（M1/M2 落地）：`olm.account`（账号 pickle）、`olm.session.<peer>.<session_id>`（会话 pickle，带对端账号便于恢复）；两者都以 KEK 经 `AccountPickle::encrypt` / `SessionPickle::encrypt` 加密后写入，再由 keystore 整体 AEAD 封装。
 
 ## 7. 图片链路（v1 只支持图片，不支持文件与视频）
 
