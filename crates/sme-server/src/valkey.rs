@@ -1,10 +1,10 @@
-//! Valkey 访问层（D9、D17、D7、docs/INFRA.md §4）。
+//! Valkey access layer (D9, D17, D7, docs/INFRA.md §4).
 //!
-//! - 所有键名与频道名里含账号的部分，一律换成 `HMAC-SHA256(服务端密钥, 账号ID)`
-//!   的前 32 个十六进制字符（D17）：运维看不到谁在等谁的消息。
-//! - 密文只进 Stream 与图片兄弟键；Stream 条目按时间裁剪，TTL 24h（D7）。
-//! - 启动自检（I7）：`save` 非空 / `appendonly yes` / 非 `noeviction` 直接拒绝启动。
-//! - 挑战、presence、预密钥、限流也都在这里，网关本身保持无状态。
+//! - Every account part of a key or channel name is replaced by `HMAC-SHA256(server key, account ID)`
+//!   the first 32 hex characters (D17): operators cannot see who is waiting for whose messages.
+//! - Ciphertext goes only into Streams and image sibling keys; stream entries are trimmed by age with a 24h TTL (D7).
+//! - Startup self-check (I7): a non-empty `save`, `appendonly yes`, or a policy other than `noeviction` refuses startup.
+//! - Challenges, presence, prekeys and rate limits live here too, keeping the gateway stateless.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,19 +16,19 @@ use sme_proto::{AccountId, PreKeyUpload};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// 密文队列 TTL（D7）。
+/// Ciphertext queue TTL (D7).
 pub const QUEUE_TTL_SECS: u64 = 24 * 60 * 60;
 
-/// 每个收件人的队列长度上限（D7）。
+/// Maximum queue length per recipient (D7).
 pub const MAX_QUEUE_LEN: i64 = 100;
 
-/// 一次性预密钥 TTL（docs/INFRA.md §4.1）。
+/// One-time prekey TTL (docs/INFRA.md §4.1).
 pub const PREKEY_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
-/// 登录挑战 TTL。
+/// Login challenge TTL.
 pub const CHALLENGE_TTL_SECS: u64 = 60;
 
-/// presence TTL；网关心跳每 20s 续期。
+/// Presence TTL; the gateway heartbeat refreshes it every 20s.
 pub const PRESENCE_TTL_SECS: u64 = 60;
 
 const PUSH_SCRIPT: &str = r#"
@@ -118,7 +118,7 @@ impl From<redis::RedisError> for ValkeyError {
     }
 }
 
-/// 网关的 Valkey 句柄；可以随意 clone（内部是重连管理器）。
+/// Gateway Valkey handle; cheap to clone (a reconnecting manager inside).
 #[derive(Clone)]
 pub struct Valkey {
     client: redis::Client,
@@ -128,7 +128,7 @@ pub struct Valkey {
 }
 
 impl Valkey {
-    /// 连接并立刻执行 I7 启动自检；不满足就返回错误（网关拒绝启动）。
+    /// Connect and run the I7 startup self-check immediately; an error here refuses gateway startup.
     pub async fn connect(
         url: &str,
         hmac_key: &[u8],
@@ -146,7 +146,7 @@ impl Valkey {
         Ok(valkey)
     }
 
-    /// I7：`save` 必须为空字符串、`appendonly` 必须为 `no`、驱逐策略必须是 `noeviction`。
+    /// I7: `save` must be empty, `appendonly` must be `no`, and the eviction policy must be `noeviction`.
     pub async fn verify_ephemeral(&self) -> Result<(), ValkeyError> {
         let mut connection = self.connection.clone();
         let values: Vec<String> = redis::cmd("CONFIG")
@@ -189,7 +189,7 @@ impl Valkey {
         &self.instance_id
     }
 
-    /// D17：`HMAC-SHA256(服务端密钥, 账号ID)` 的前 32 个十六进制字符。
+    /// D17: the first 32 hex characters of `HMAC-SHA256(server key, account ID)`.
     pub fn hmac_account(&self, account: AccountId) -> String {
         let mut mac = HmacSha256::new_from_slice(&self.hmac_key).expect("HMAC 接受任意长度密钥");
         mac.update(account.as_bytes());
@@ -197,7 +197,7 @@ impl Valkey {
         to_hex(&digest[..16])
     }
 
-    /// 账号的唤醒频道名。
+    /// Wake-up channel name for an account.
     pub fn channel(&self, account: AccountId) -> String {
         format!("gw:{}", self.hmac_account(account))
     }
@@ -218,7 +218,7 @@ impl Valkey {
         format!("pk:{}", self.hmac_account(account))
     }
 
-    /// 入队一条密文；返回 Stream 条目 ID（客户端用它做 D-ack）。
+    /// Enqueue one ciphertext; returns the Stream entry ID used by the client for D-ack.
     pub async fn enqueue(&self, to: AccountId, envelope: &[u8]) -> Result<String, ValkeyError> {
         let mut connection = self.connection.clone();
         let min_id = now_millis().saturating_sub(QUEUE_TTL_SECS * 1000);
@@ -233,7 +233,7 @@ impl Valkey {
         Ok(entry_id)
     }
 
-    /// D-ack：原子删除队列条目与图片兄弟键。
+    /// D-ack: atomically delete the queue entry and its image sibling key.
     pub async fn ack(&self, account: AccountId, entry_id: &str) -> Result<(), ValkeyError> {
         let mut connection = self.connection.clone();
         let _: i64 = redis::Script::new(ACK_SCRIPT)
@@ -245,7 +245,7 @@ impl Valkey {
         Ok(())
     }
 
-    /// 读取该收件人全部未 D-ack 的条目（条目 ID + 信封字节）。
+    /// Read all un-D-acked entries for this recipient (entry ID + envelope bytes).
     pub async fn queued(&self, account: AccountId) -> Result<Vec<(String, Vec<u8>)>, ValkeyError> {
         let mut connection = self.connection.clone();
         let value: redis::Value = redis::cmd("XRANGE")
@@ -257,7 +257,7 @@ impl Valkey {
         parse_stream_entries(value)
     }
 
-    /// 唤醒持有该账号连接的网关；`payload` 是 Stream 条目 ID 或 `"k"`（顶替旧会话）。
+    /// Wake the gateway holding this account's connection; `payload` is a Stream entry ID or `"k"` (replace the old session).
     pub async fn publish(&self, account: AccountId, payload: &str) -> Result<(), ValkeyError> {
         let mut connection = self.connection.clone();
         let _: i64 = redis::cmd("PUBLISH")
@@ -268,14 +268,14 @@ impl Valkey {
         Ok(())
     }
 
-    /// 订阅某个账号的唤醒频道。
+    /// Subscribe to the wake-up channel of an account.
     pub async fn subscribe(&self, account: AccountId) -> Result<PubSub, ValkeyError> {
         let mut pubsub = self.client.get_async_pubsub().await?;
         pubsub.subscribe(self.channel(account)).await?;
         Ok(pubsub)
     }
 
-    /// 上传一次性预密钥（Hash，TTL 7 天）；返回服务端保存的总数。
+    /// Upload one-time prekeys (Hash, 7-day TTL); returns the total kept server-side.
     pub async fn store_prekeys(
         &self,
         account: AccountId,
@@ -305,7 +305,7 @@ impl Valkey {
         Ok(stored.max(0) as u64)
     }
 
-    /// 取走一条一次性预密钥（取出即删）。
+    /// Take one one-time prekey (deleted on take).
     pub async fn take_prekey(
         &self,
         account: AccountId,
@@ -324,7 +324,7 @@ impl Valkey {
         Ok(Some(PreKeyUpload { key_id, public_key }))
     }
 
-    /// 保存登录挑战：`nonce → h(account)`，60s 过期。
+    /// Store a login challenge: `nonce -> h(account)`, expiring in 60s.
     pub async fn set_challenge(
         &self,
         nonce: &[u8; 32],
@@ -341,7 +341,7 @@ impl Valkey {
         Ok(())
     }
 
-    /// 一次性读取并删除挑战。
+    /// Read and delete the challenge in one shot.
     pub async fn take_challenge(&self, nonce: &[u8; 32]) -> Result<Option<String>, ValkeyError> {
         let mut connection = self.connection.clone();
         let value: Option<String> = redis::cmd("GETDEL")
@@ -351,7 +351,7 @@ impl Valkey {
         Ok(value)
     }
 
-    /// 登录时接管 presence；返回之前的实例 ID（用于踢旧网关的连接）。
+    /// Take over presence at login; returns the previous instance ID (used to kick the old gateway's connection).
     pub async fn take_presence(&self, account: AccountId) -> Result<Option<String>, ValkeyError> {
         let mut connection = self.connection.clone();
         let previous: Option<String> = redis::Script::new(PRESENCE_TAKE_SCRIPT)
@@ -363,7 +363,7 @@ impl Valkey {
         Ok(previous)
     }
 
-    /// 心跳续期：只有 presence 仍属于本实例时才续（否则说明已被新登录顶替）。
+    /// Heartbeat refresh: only refresh while presence still belongs to this instance (otherwise a newer login replaced us).
     pub async fn refresh_presence(&self, account: AccountId) -> Result<bool, ValkeyError> {
         let mut connection = self.connection.clone();
         let refreshed: i64 = redis::Script::new(PRESENCE_REFRESH_SCRIPT)
@@ -375,7 +375,7 @@ impl Valkey {
         Ok(refreshed == 1)
     }
 
-    /// 断开时清理 presence，仅当它仍属于本实例。
+    /// Clear presence on disconnect, only while it still belongs to this instance.
     pub async fn clear_presence(&self, account: AccountId) -> Result<(), ValkeyError> {
         let mut connection = self.connection.clone();
         let _: i64 = redis::Script::new(PRESENCE_CLEAR_SCRIPT)
@@ -386,7 +386,7 @@ impl Valkey {
         Ok(())
     }
 
-    /// 固定窗口限流：窗口内计数不超过 `limit` 时返回 `true`。
+    /// Fixed-window rate limit: returns `true` while the window count stays within `limit`.
     pub async fn check_rate_limit(
         &self,
         scope: &str,
@@ -405,7 +405,7 @@ impl Valkey {
         Ok(count.max(0) as u64 <= limit)
     }
 
-    /// `/stats` 用的聚合值：键总数（只有数量，不含任何内容）。
+    /// Aggregate value for `/stats`: total key count (a number only, no content).
     pub async fn dbsize(&self) -> Result<u64, ValkeyError> {
         let mut connection = self.connection.clone();
         let size: i64 = redis::cmd("DBSIZE").query_async(&mut connection).await?;
@@ -413,7 +413,7 @@ impl Valkey {
     }
 }
 
-/// 生成网关实例 ID（presence 与顶替判断用）。
+/// Generate a gateway instance ID (used for presence and replacement checks).
 pub fn random_instance_id() -> Result<String, ValkeyError> {
     let mut bytes = [0u8; 8];
     getrandom::fill(&mut bytes).map_err(|_| ValkeyError::RandomSource)?;
@@ -463,7 +463,7 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-/// XRANGE 原始回复 → (条目 ID, 信封字节)。
+/// Raw XRANGE reply -> (entry ID, envelope bytes).
 fn parse_stream_entries(value: redis::Value) -> Result<Vec<(String, Vec<u8>)>, ValkeyError> {
     let redis::Value::Array(rows) = value else {
         return Err(ValkeyError::BadValue("XRANGE reply"));

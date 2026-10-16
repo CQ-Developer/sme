@@ -14,6 +14,7 @@
 > - v0.10：M2 完成——axum 网关（注册 / 挑战-签名登录 / 预密钥 / 密文转发 / 离线队列 / D-ack）、客户端核心状态机（Olm 握手、加解密、内存缓冲、持久化信号）与 WebSocket 传输；端到端测试覆盖离线队列与跨重启棘轮恢复。
 > - v0.11：M3 完成——队列 / 预密钥 / 挑战 / presence / 限流全部进入 Valkey（D17 HMAC 键名、Stream TTL 24h、D-ack 原子删）；网关无状态；启动自检 I7；新增 I1/I5/I7/I8 不变式测试。
 > - v0.12：M4 完成——ratatui 参考客户端（仅文本：`/peer` 选对端、Ctrl+X 紧急擦除、空闲锁定）；消息缓冲与会话全链路 `Zeroize`；I4（应用目录金丝雀扫描）与 I6（类型级 zeroize 契约 + wipe 语义）测试；新增 `LocalConfig`。
+> - v0.13：产品调整——桌面三平台统一 TUI（D4a′ 修订，取消 egui/iced 路线；M6 改为平台适配）；代码注释全部改为英文。
 
 ## 1. 产品定位（一句话）
 
@@ -52,7 +53,7 @@
 - 系统 swap / 休眠（suspend-to-disk）
 - TLS session ticket 缓存、DNS 缓存
 - 剪贴板、系统通知中心、输入法词库
-- GUI 框架的 WebView 缓存 / IndexedDB / GPU 缓存
+- 终端回滚缓冲 / tmux / screen 日志（桌面统一 TUI 后的字节旁路）
 - 崩溃上报、遥测、自动更新残留
 
 因此「无落盘」必须是一个**可验证的约束**（见 §7 不变式），而不是口号。
@@ -64,15 +65,13 @@ flowchart TB
   subgraph CL["客户端：同一 Rust 核心，多平台外壳"]
     IOS["iOS · SwiftUI"]
     AND["Android · Jetpack Compose"]
-    GUI["Windows / macOS / Linux · 桌面 GUI"]
-    TUI["Linux · TUI ratatui<br/>（参考实现）"]
+    TUI["Windows / macOS / Linux · TUI (ratatui)<br/>参考实现"]
     FFI["uniffi 绑定层"]
     CFILE["本地 keystore（AEAD 加密）<br/>身份密钥 · Olm 账号与会话<br/>通讯录 · TOFU pin<br/>不含任何消息"]
     CORE["sme-client-core<br/>Olm 会话 · 明文缓冲 ≤ 10 条<br/>口令 → 密钥 (Argon2id) · 禁止 IO · zeroize"]
     IOS --> FFI
     AND --> FFI
     FFI --> CORE
-    GUI --> CORE
     TUI --> CORE
     CORE -. "仅密钥材料与用户信息" .-> CFILE
   end
@@ -115,12 +114,11 @@ Cargo workspace（Rust）
     sme-client-store/  本地 keystore：加解密并读写密钥材料与用户信息（唯一允许写盘的客户端 crate）
     sme-client-net/    WebSocket 传输、重连、心跳（唯一允许网络的客户端 crate）
     sme-ffi/           uniffi 绑定层：导出给 Swift / Kotlin
-    sme-client-tui/    ratatui 参考客户端
+    sme-client-tui/    桌面三平台参考客户端（Windows/macOS/Linux，ratatui，仅文本）
     sme-server/        axum 网关：认证、在线状态、共享队列访问、限流
   apps/
     ios/               SwiftUI 外壳：渲染 + 输入 + 平台生命周期
     android/           Jetpack Compose 外壳：同上
-    desktop/           桌面 GUI 外壳（实现形式见 D4a′）
   docs/
     THREAT_MODEL.md    威胁模型与信任假设
     NO_STORAGE.md      「本应用零写盘」清单与逐平台审计记录
@@ -214,7 +212,7 @@ Cargo workspace（Rust）
 | I1 | 服务端持久化层不含任何消息字段 | schema 断言（用户库不存在消息表/列）+ I9 金丝雀扫描 | 服务端 |
 | I2 | 客户端核心代码不含文件/网络/进程 API | CI 静态禁词扫描（`std::fs` / `std::net` / `std::process` …），命中即失败 | 全平台（源码级） |
 | I3 | 内存中明文消息条数 ≤ 10 | 单元测试：写入 100 条后断言缓冲长度与最旧内容 | 全平台 |
-| I4 | 客户端写入磁盘的字节中不含消息内容 | 金丝雀 + 白名单审计（允许 keystore 与用户信息文件存在，但其内不得出现消息字符串） | 桌面与 TUI 自动化；iOS/Android 用沙箱目录审计（§11） |
+| I4 | 客户端写入磁盘的字节中不含消息内容 | 金丝雀 + 白名单审计（允许 keystore 与用户信息文件存在，但其内不得出现消息字符串） | 桌面 TUI（Windows/macOS/Linux）自动化；iOS/Android 用沙箱目录审计（§11） |
 | I5 | 服务端日志不含消息内容 | 金丝雀字符串不出现在服务端任何输出流中 | 服务端 |
 | I6 | 退出即擦除内存中的 KEK、口令与消息 | 全程 `zeroize`；断言析构顺序（`mlock` / 禁 core dump 为尽力项，非承诺） | 全平台 |
 | I7 | 易失队列组件禁用持久化 | 服务端启动自检 `CONFIG GET save appendonly`，不满足则拒绝启动 | 服务端 |
@@ -243,7 +241,7 @@ Cargo workspace（Rust）
 | M3 | 横向扩展改造：无状态网关 + 共享易失队列 + TTL + ACK 即删 + 限流 + 在线状态 + 启动自检 | 不变式 I1、I5、I7、I8 测试通过 |
 | M4 | TUI 参考客户端（**仅文本**）+ 零消息落盘加固（`zeroize`、紧急擦除、syscall 断言） | 不变式 I2、I3、I4、I6、I11 测试通过（Linux/macOS/Windows） |
 | M5 | 移动端：uniffi + iOS/Android 外壳 + `sme-media` 图片链路（压缩 / 剥离 EXIF / 解压炸弹防御）+ 平台加固（防快照） | 沙箱目录审计通过；I12 通过 |
-| M6 | 桌面 GUI（D4a′）+ 复用图片链路 | 复用 M4 的不变式测试 |
+| M6 | 桌面三平台（Windows/macOS/Linux）TUI 适配与平台审计（构建、数据目录、权限） | 三平台构建通过；复用 M4 的不变式测试 |
 | M7（后续） | 安全码核对 UI（SAS）、群聊（Megolm/MLS）、元数据保护；**文件与视频**（平台原生编码器，不用 FFmpeg） | — |
 
 ## 10. 决策记录
@@ -270,7 +268,7 @@ Cargo workspace（Rust）
 | **D11** | 持久化范围 | **消息零落盘（客户端与服务端都是）+ 用户信息可持久化**（§11） |
 | **D9** | 横向扩展方式 | 无状态网关 + 禁用持久化的共享易失队列（§12.1） |
 | **D10** | 同账号并发登录 | 单会话：新登录踢掉旧会话 |
-| **D4a′** | 桌面 GUI | 纯 Rust GUI（egui / iced），不用 WebView |
+| **D4a′** | 桌面客户端形式 | ✅ **修订（v0.13）**：Windows / macOS / Linux 统一使用 TUI 参考客户端（ratatui），不再另做 GUI。理由：一套实现 + 与「明文只存在于内存缓冲」的约束最一致，也避免了 WebView 缓存旁路 |
 | **D16** | 账号 ID 形态 | 128-bit 随机，base32 26 字符（防用户名枚举） |
 | **D17** | Valkey 键与频道名 | 一律用 `HMAC(服务端密钥, 账号ID)`，运维看不到谁在等谁的消息 |
 | **D18** | TLS 终止 | Caddy 反代（自动证书） |
@@ -283,7 +281,7 @@ Cargo workspace（Rust）
 
 ### 10.2 待定
 
-无待定项。M4 已完成（v0.12），下一步 M5。
+无待定项。M4 已完成（v0.12），桌面统一 TUI 见 D4a′ 的 v0.13 修订；下一步 M5。
 
 ## 11. 持久化策略（D11 / D13）
 
@@ -325,12 +323,12 @@ D2 修订后，会话状态可跨启动恢复，移动端进程被杀不再意�
 
 | # | 子决策 | 结论 |
 | --- | --- | --- |
-| **D4a** | 客户端 UI 层 | 一套 Rust 核心 + 各平台原生外壳（SwiftUI / Compose / 桌面 GUI / ratatui）。舍弃 Flutter 与 React Native：额外运行时的字符串不可擦除，GC 与框架自身缓存行为不可控 |
+| **D4a** | 客户端 UI 层 | 一套 Rust 核心 + 各平台外壳（移动端 SwiftUI / Compose；桌面三平台统一 ratatui TUI，见 D4a′）。舍弃 Flutter 与 React Native：额外运行时的字符串不可擦除，GC 与框架自身缓存行为不可控 |
 | **D4b** | Rust ↔ 平台 FFI | `uniffi`（一份接口生成 Swift + Kotlin 绑定），路径已被 matrix-rust-sdk 验证 |
 | **D4c** | 服务端 | Rust（axum + tokio），与客户端共享 `sme-proto` 类型 |
 | **D4d** | 线路序列化 | `postcard`；解析必须严格（拒绝未知字段、限制长度），密码学代码不依赖 serde |
 | **D4e** | `no_std` 核心 | ❌ 关闭，实测结论见 §14 |
-| **D4a′** | 桌面 GUI 形式 | 待定，见 §10.2 |
+| **D4a′** | 桌面客户端形式 | ✅ 修订（v0.13）：Windows / macOS / Linux 统一 TUI（ratatui） |
 
 ### 12.1 服务端横向扩展（D9）
 

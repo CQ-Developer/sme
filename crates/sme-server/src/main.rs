@@ -1,4 +1,4 @@
-//! sme 网关入口：读环境变量、连 Postgres 与 Valkey、跑迁移、启动自检、监听端口。
+//! sme gateway entry point: read env vars, connect Postgres and Valkey, run migrations, self-check, listen.
 
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await?;
     sqlx::migrate!("../../migrations").run(&pool).await?;
 
-    // I7：队列组件必须禁用一切持久化，否则拒绝启动。
+    // I7: the queue component must have all persistence disabled, or startup is refused.
     let instance_id = random_instance_id().map_err(|error| error.to_string())?;
     let valkey = Valkey::connect(&config.valkey_url, config.hmac_key.as_bytes(), instance_id)
         .await

@@ -1,6 +1,6 @@
-//! 集成测试支撑：临时 Valkey 容器、临时目录与最小 WS 客户端。
+//! Integration-test support: temporary Valkey containers, temp directories and a minimal WS client.
 //!
-//! 只被 `sme-server` / `sme-client-tui` 的测试使用，不进入任何产品二进制。
+//! Used only by `sme-server` / `sme-client-tui` tests; never linked into a product binary.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -16,7 +16,7 @@ use vodozemac::olm::Account;
 
 static CONTAINER_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 一个由测试启动、进程退出时清理的 Valkey 容器。
+/// A Valkey container started by a test and removed when the process exits.
 pub struct ValkeyContainer {
     name: String,
     url: String,
@@ -24,12 +24,12 @@ pub struct ValkeyContainer {
 }
 
 impl ValkeyContainer {
-    /// 启动一个禁用持久化的 Valkey（tmpfs + `--save ""` + `--appendonly no`）。
+    /// Start a persistence-disabled Valkey (tmpfs + `--save ""` + `--appendonly no`).
     pub async fn ephemeral() -> Result<Self, String> {
         Self::start_with(true).await
     }
 
-    /// 故意打开 AOF 的 Valkey，用于 I7 负例。
+    /// A Valkey with AOF deliberately enabled, for the I7 negative case.
     pub async fn with_appendonly() -> Result<Self, String> {
         Self::start_with(false).await
     }
@@ -87,7 +87,7 @@ impl ValkeyContainer {
         self.port
     }
 
-    /// 重启容器（模拟 Valkey 进程重启；用来验证 I8）。
+    /// Restart the container (simulates a Valkey process restart; verifies I8).
     pub async fn restart(&self) -> Result<(), String> {
         let status = Command::new("docker")
             .args(["restart", &self.name])
@@ -116,7 +116,7 @@ impl ValkeyContainer {
         }
     }
 
-    /// 读取容器日志，I7 负例里用来断言网关确实拒绝启动。
+    /// Read container logs; the I7 negative case uses this to assert the gateway really refused to start.
     pub fn logs(&self) -> Result<String, String> {
         let output = Command::new("docker")
             .args(["logs", &self.name])
@@ -150,7 +150,7 @@ async fn ping(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 让操作系统分配一个空闲端口（存在极小竞态，测试里可接受）。
+/// Ask the OS for a free port (a tiny race, acceptable in tests).
 pub fn free_port() -> Result<u16, String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|error| format!("无法分配空闲端口：{error}"))?;
@@ -160,7 +160,7 @@ pub fn free_port() -> Result<u16, String> {
         .map_err(|error| format!("无法读取本地端口：{error}"))
 }
 
-/// 自清理的临时目录。
+/// Self-cleaning temp directory.
 pub struct TestDir(PathBuf);
 
 impl TestDir {
@@ -189,7 +189,7 @@ impl Drop for TestDir {
     }
 }
 
-/// 最小 WS 测试客户端。
+/// Minimal WS test client.
 pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub async fn connect(url: &str) -> Socket {
@@ -197,7 +197,7 @@ pub async fn connect(url: &str) -> Socket {
     socket
 }
 
-/// 连接失败时返回 `None`，用于等待服务端就绪。
+/// Returns `None` on connect failure, used to wait for the server to become ready.
 pub async fn try_connect(url: &str) -> Option<Socket> {
     connect_async(url).await.ok().map(|(socket, _)| socket)
 }

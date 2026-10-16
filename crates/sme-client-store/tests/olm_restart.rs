@@ -1,7 +1,7 @@
-//! M1 退出标准：账号与 Olm 会话跨「重启」保持不变，棘轮可以继续收发。
+//! M1 exit criterion: account and Olm sessions survive a "restart" and the ratchet keeps working.
 //!
-//! 真实的进程重启由「丢弃内存对象 + 重新 `Keystore::open`」模拟；
-//! 落盘走 vodozemac 公开 API 的 `pickle().encrypt(kek)`（plan.md §6.1）。
+//! A real process restart is simulated by dropping in-memory objects and reopening `Keystore::open`;
+//! Persistence goes through vodozemac's public `pickle().encrypt(kek)` API (plan.md §6.1).
 
 mod common;
 
@@ -12,7 +12,7 @@ use vodozemac::olm::{Account, OlmMessage, Session, SessionConfig};
 
 const PASSWORD: &[u8] = b"correct horse battery staple";
 
-/// Alice 向 Bob 发起 Olm 握手，双方各自拿到会话。
+/// Alice starts the Olm handshake with Bob; both sides end up with a session.
 fn establish_sessions() -> (Account, Account, Session, Session) {
     let alice = Account::new();
     let mut bob = Account::new();
@@ -61,7 +61,7 @@ fn account_and_session_survive_restart() {
     keystore.save_session(peer, &alice_session).unwrap();
     keystore.save().unwrap();
 
-    // 模拟重启：内存里的 Alice 全部丢弃，只从磁盘重新打开。
+    // Simulate a restart: drop the in-memory Alice entirely and reopen from disk.
     drop(alice_session);
     drop(alice);
 
@@ -75,14 +75,14 @@ fn account_and_session_survive_restart() {
     assert_eq!(restored_peer, peer);
     assert_eq!(alice_session_restored.session_id(), session_id);
 
-    // 棘轮连续性：Bob 用重启前的会话发消息，恢复后的 Alice 必须能解开。
+    // Ratchet continuity: Bob sends on the pre-restart session and the restored Alice must decrypt it.
     let message = bob_session.encrypt("after restart").unwrap();
     assert_eq!(
         alice_session_restored.decrypt(&message).unwrap(),
         b"after restart".to_vec()
     );
 
-    // 反向：恢复后的 Alice 发消息，Bob 必须能解开。
+    // Reverse direction: the restored Alice sends and Bob must decrypt it.
     let message = alice_session_restored
         .encrypt("from restored alice")
         .unwrap();

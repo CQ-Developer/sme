@@ -1,7 +1,7 @@
-//! M2 线路帧：控制帧（注册 / 登录 / 预密钥）与 Olm 消息信封。
+//! M2 wire frames: control frames (register / login / prekeys) and the Olm message envelope.
 //!
-//! 信封的 `payload` 是 `OlmMessage`（pre-key 或 normal）的原始字节；
-//! 消息序号、nonce 等由 Olm 内部管理，不在这层出现（plan.md §6.3 已据此修订）。
+//! The envelope `payload` holds raw `OlmMessage` bytes (pre-key or normal);
+//! Message indices, nonces and friends are managed inside Olm and never appear here (plan.md §6.3 revised accordingly).
 
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +11,7 @@ use crate::{
     MAX_PREKEYS_PER_UPLOAD, MAX_SESSION_ID_LEN, PROTOCOL_VERSION, ProtoError,
 };
 
-/// 注册时提交的 Argon2id 参数（服务端按 docs/INFRA.md §3 存成 JSONB）。
+/// Argon2id parameters submitted at registration (stored as JSONB per docs/INFRA.md §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KdfParams {
     pub m_cost: u32,
@@ -19,7 +19,7 @@ pub struct KdfParams {
     pub p_cost: u32,
 }
 
-/// 首次注册：身份公钥、客户端生成的口令盐与 KDF 参数。
+/// First registration: identity public keys plus client-generated password salt and KDF parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Registration {
     pub account_id: AccountId,
@@ -29,8 +29,8 @@ pub struct Registration {
     pub kdf_params: KdfParams,
 }
 
-/// Ed25519 签名（64 字节）。serde 只对 `[u8; 32]` 及以下实现了数组编解码，所以这里用
-/// `serialize_bytes` 手写一份固定长度实现。
+/// Ed25519 signature (64 bytes). serde only implements array codecs up to `[u8; 32]`, so this uses
+/// a hand-written fixed-length implementation via `serialize_bytes`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signature([u8; Self::LEN]);
 
@@ -74,14 +74,14 @@ impl<'de> Deserialize<'de> for Signature {
     }
 }
 
-/// 上传的一条一次性预密钥。
+/// One uploaded one-time prekey.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreKeyUpload {
     pub key_id: String,
     pub public_key: [u8; 32],
 }
 
-/// 服务端交给发起方的预密钥 bundle；一次性预密钥取出即从服务端删除。
+/// Prekey bundle handed to the initiator; one-time keys are deleted server-side when taken.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreKeyBundle {
     pub account_id: AccountId,
@@ -91,14 +91,14 @@ pub struct PreKeyBundle {
     pub one_time_key: [u8; 32],
 }
 
-/// Olm 消息种类，对应 `vodozemac::olm::OlmMessage`。
+/// Olm message kind, mirroring `vodozemac::olm::OlmMessage`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OlmMessageKind {
     PreKey,
     Normal,
 }
 
-/// 加密消息信封。服务端只读路由字段（`from` / `to`），其余一律照转。
+/// Encrypted message envelope. The server reads only routing fields (`from` / `to`) and forwards the rest verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
     pub v: u8,
@@ -109,7 +109,7 @@ pub struct Envelope {
     pub payload: Vec<u8>,
 }
 
-/// 服务端返回的错误码。`detail` 只用于诊断，不承诺稳定。
+/// Server error codes. `detail` is diagnostic only and not stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorCode {
     BadFrame,
@@ -125,7 +125,7 @@ pub enum ErrorCode {
     Internal,
 }
 
-/// 一份连接上的全部帧类型。
+/// Every frame type carried over one connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Frame {
     Register(Registration),
@@ -159,9 +159,9 @@ pub enum Frame {
     },
     PreKeyBundle(PreKeyBundle),
 
-    /// 发送一条加密消息；服务端接管后回 `SendAck`（Q-ack）。
+    /// Send one encrypted message; the server replies `SendAck` (Q-ack) once it takes custody.
     Send(Envelope),
-    /// 服务端投递一条消息；`msg_id` 是 Valkey Stream 的条目 ID，接收方 D-ack 后服务端据此删除。
+    /// Server delivers a message; `msg_id` is the Valkey Stream entry ID that the server deletes on D-ack.
     Deliver {
         msg_id: String,
         envelope: Envelope,
@@ -180,7 +180,7 @@ pub enum Frame {
 }
 
 impl Frame {
-    /// 字段级校验；[`crate::encode`] 与 [`crate::decode`] 都会调用。
+    /// Field-level validation, called by both [`crate::encode`] and [`crate::decode`].
     pub fn validate(&self) -> Result<(), ProtoError> {
         match self {
             Self::Register(registration) => registration.validate(),
@@ -217,7 +217,7 @@ impl Registration {
         if params.m_cost == 0 || params.t_cost == 0 || params.p_cost == 0 {
             return Err(ProtoError::InvalidFrame("kdf params must be non-zero"));
         }
-        // 上限防止注册时塞入荒谬参数（Argon2id 只在客户端跑，但服务端要存）
+        // Caps stop absurd parameters at registration (Argon2id runs client-side, but the server stores them)
         if params.m_cost > 1 << 18 || params.t_cost > 64 || params.p_cost > 16 {
             return Err(ProtoError::InvalidFrame("kdf params out of range"));
         }

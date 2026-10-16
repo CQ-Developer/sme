@@ -1,8 +1,8 @@
-//! 线路协议：控制帧、Olm 消息信封、版本协商与 postcard 编解码（D4c、D4d）。
+//! Wire protocol: control frames, Olm message envelope, version negotiation and postcard codec (D4c, D4d).
 //!
-//! - 解码严格：拒绝多余字节、未知枚举分支与超限字段；单帧上限见 [`MAX_FRAME_BYTES`]。
-//! - 密码学不在这里：`Envelope::payload` 是 Olm 密文的原始字节，服务端只按 `to` 转发。
-//! - 本 crate 禁止文件 / 网络 / 进程 API（I2 门禁）。
+//! - Strict decoding: reject trailing bytes, unknown enum variants and oversized fields; see [`MAX_FRAME_BYTES`].
+//! - No cryptography here: `Envelope::payload` is raw Olm ciphertext and the server only routes by `to`.
+//! - This crate must not use file / network / process APIs (I2 gate).
 
 mod account_id;
 mod codec;
@@ -15,33 +15,33 @@ pub use frame::{
     Registration, Signature,
 };
 
-/// 当前线路协议版本，对应信封的 `v` 字段。
+/// Current wire protocol version, carried in the envelope's `v` field.
 pub const PROTOCOL_VERSION: u8 = 1;
 
-/// 单帧最大字节数（docs/INFRA.md §5：网关 WSS 消息上限 1.2MB）。
+/// Maximum frame size (docs/INFRA.md §5: gateway WSS limit 1.2MB).
 pub const MAX_FRAME_BYTES: usize = 1_200_000;
 
-/// 单个信封密文载荷上限，留出 1MB 图片与 Olm 封装开销的余量。
+/// Maximum payload per envelope, leaving room for a 1MB image plus Olm overhead.
 pub const MAX_ENVELOPE_PAYLOAD: usize = 1_100_000;
 
-/// `Envelope::sid` 长度上限。
+/// Maximum `Envelope::sid` length.
 pub const MAX_SESSION_ID_LEN: usize = 128;
 
-/// 单次上传的一次性预密钥条数上限。
+/// Maximum one-time prekeys per upload.
 pub const MAX_PREKEYS_PER_UPLOAD: u16 = 100;
 
-/// 预密钥 `key_id` 字符串长度上限。
+/// Maximum string length of a prekey `key_id`.
 pub const MAX_KEY_ID_LEN: usize = 64;
 
-/// `Frame::Error::detail` 长度上限。
+/// Maximum `Frame::Error::detail` length.
 pub const MAX_ERROR_DETAIL_LEN: usize = 512;
 
-/// Valkey Stream 条目 ID 的字符串长度上限（形如 `1700000000000-0`）。
+/// Maximum string length of a Valkey Stream entry ID (like `1700000000000-0`).
 pub const MAX_MSG_ID_LEN: usize = 64;
 
-/// 登录签名的规范化载荷：域名分隔 + 账号 ID + 挑战 nonce。
+/// Canonical login-signature payload: domain separator + account ID + challenge nonce.
 ///
-/// 客户端与网关必须用同一份字节做签名/校验，避免跨账号重放。
+/// Client and gateway must sign/verify the same bytes to prevent cross-account replay.
 pub fn login_payload(account_id: &AccountId, nonce: &[u8; 32]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(LOGIN_DOMAIN.len() + 16 + 32);
     payload.extend_from_slice(LOGIN_DOMAIN);
@@ -52,7 +52,7 @@ pub fn login_payload(account_id: &AccountId, nonce: &[u8; 32]) -> Vec<u8> {
 
 const LOGIN_DOMAIN: &[u8] = b"sme-login-v1";
 
-/// 编解码错误。
+/// Codec errors.
 #[derive(Debug)]
 pub enum ProtoError {
     Encode(postcard::Error),

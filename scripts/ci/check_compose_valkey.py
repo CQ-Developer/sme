@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""门禁③：docker-compose.yml 中的 Valkey 必须禁用一切持久化。
+"""Gate 3: Valkey in docker-compose.yml must have all persistence disabled.
 
-断言（docs/INFRA.md §5、§9）：
-  - valkey 服务不挂任何卷；
-  - 数据目录 /data 挂 tmpfs；
-  - 启动参数含 --save ""、--appendonly no、--maxmemory 1gb、--maxmemory-policy noeviction、--dir /data。
+Assertions (docs/INFRA.md §5, §9):
+  - the valkey service mounts no volumes;
+  - /data is a tmpfs;
+  - the command contains --save "", --appendonly no, --maxmemory 1gb,
+    --maxmemory-policy noeviction and --dir /data.
 
-Valkey 一旦落盘，「消息零落盘」直接失效。除本 lint 外还有启动自检（I7）与 tmpfs 两道防线。
+Valkey writing to disk breaks "no message ever hits disk" outright. Besides this
+lint there is the startup self-check (I7) and the tmpfs as a second line of defence.
 
-用法：check_compose_valkey.py [compose 文件路径]
+Usage: check_compose_valkey.py [compose file path]
 """
 
 from __future__ import annotations

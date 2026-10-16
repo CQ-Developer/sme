@@ -1,7 +1,7 @@
-//! 网关运行时状态：本实例的活连接、已见账号与聚合计数。
+//! Gateway runtime state: this instance's live connections, accounts seen and aggregate counters.
 //!
-//! 队列、预密钥、挑战、presence、限流都在 Valkey（见 [`crate::valkey`]），
-//! 网关本身不保存任何密文。
+//! Queues, prekeys, challenges, presence and rate limits live in Valkey (see [`crate::valkey`]),
+//! The gateway itself stores no ciphertext.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,30 +14,30 @@ use tokio::sync::mpsc::Sender;
 
 use crate::valkey::Valkey;
 
-/// 同时处理的大消息（>64KB）上限，防止少量 1MB 消息吃光网关内存（docs/INFRA.md §4.3）。
+/// Cap on concurrently handled big messages (>64KB) so a few 1MB messages cannot exhaust gateway memory (docs/INFRA.md §4.3).
 pub const MAX_CONCURRENT_BIG_MESSAGES: usize = 8;
 
-/// 超过该大小的信封走大消息信号量。
+/// Envelopes larger than this go through the big-message semaphore.
 pub const BIG_MESSAGE_BYTES: usize = 64 * 1024;
 
-/// 每账号每分钟消息上限（docs/INFRA.md §4.3）。
+/// Per-account messages-per-minute cap (docs/INFRA.md §4.3).
 pub const MESSAGE_RATE_LIMIT_PER_MINUTE: u64 = 120;
 
-/// 每账号每分钟登录挑战上限。
+/// Per-account login challenges per minute cap.
 pub const CHALLENGE_RATE_LIMIT_PER_MINUTE: u64 = 30;
 
-/// 一条连接句柄。
+/// A connection handle.
 #[derive(Clone)]
 pub struct Connection {
-    /// 连接序号：被顶替（D10）时用来避免误删新连接。
+    /// Connection sequence number: avoids removing a newer connection when replaced (D10).
     pub conn_id: u64,
-    /// 出站帧通道。
+    /// Outbound frame channel.
     pub tx: Sender<Frame>,
-    /// 让读循环主动退出（顶替 / 远端踢出）。
+    /// Ask the read loop to exit (local or remote replacement).
     pub kick: Sender<()>,
 }
 
-/// 共享状态；`AppState` 可以随意 clone。
+/// Shared state; `AppState` is cheap to clone.
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
@@ -92,7 +92,7 @@ impl AppState {
         self.known.lock().expect("known mutex poisoned")
     }
 
-    /// 这个实例见过该账号（注册或成功登录过），用于拒绝随机 ID 的投递。
+    /// This instance has seen the account (registered or logged in), used to reject deliveries to random IDs.
     pub fn is_known(&self, account_id: AccountId) -> bool {
         self.known().contains(&account_id)
     }

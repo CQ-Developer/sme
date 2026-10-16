@@ -1,4 +1,4 @@
-//! 帧编解码的边界行为：每种帧都能往返，非法输入必须被严格拒绝。
+//! Codec edge cases: every frame round-trips and invalid input is strictly rejected.
 
 use sme_proto::{
     AccountId, Envelope, ErrorCode, Frame, KdfParams, OlmMessageKind, PROTOCOL_VERSION,
@@ -108,7 +108,7 @@ fn trailing_bytes_are_rejected() {
 
 #[test]
 fn unknown_variant_is_rejected() {
-    // postcard 的 enum 标签是 varint；99 超出当前变体数量。
+    // postcard encodes enum tags as varints; 99 is beyond the current variant count.
     assert!(decode(&[99]).is_err());
 }
 

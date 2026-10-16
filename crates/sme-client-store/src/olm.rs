@@ -1,32 +1,32 @@
-//! Olm 账号与会话的持久化（M1 / M2）。
+//! Persistence for Olm accounts and sessions (M1 / M2).
 //!
-//! 格式完全走 vodozemac 的公开 API：`AccountPickle::encrypt(kek)` /
-//! `SessionPickle::encrypt(kek)`，条目本身再由 keystore 的 AEAD 整体保护（D23）。
-//! 不依赖任何内部序列化格式。
+//! The format uses only vodozemac public APIs: `AccountPickle::encrypt(kek)` /
+//! `SessionPickle::encrypt(kek)`, with the entry as a whole additionally protected by the keystore AEAD (D23).
+//! No internal serialization formats are relied upon.
 //!
-//! 会话条目名带对端账号（`olm.session.<peer>.<session_id>`）：vodozemac 的
-//! `Session` 不暴露对端，恢复时必须靠条目名归档。
+//! Session entry names carry the peer account (`olm.session.<peer>.<session_id>`): vodozemac's
+//! `Session` does not expose the peer, so restore relies on the entry name to file it.
 
 use sme_proto::AccountId;
 use vodozemac::olm::{Account, AccountPickle, Session, SessionPickle};
 
 use crate::{Keystore, StoreError};
 
-/// keystore 里账号 pickle 的条目名。
+/// Entry name for the account pickle in the keystore.
 pub const ACCOUNT_ENTRY: &str = "olm.account";
 
-/// keystore 里会话 pickle 的条目名前缀。
+/// Entry-name prefix for session pickles in the keystore.
 pub const SESSION_ENTRY_PREFIX: &str = "olm.session.";
 
 impl Keystore {
-    /// 用 KEK 加密并保存 Olm 账号（身份密钥 + 一次性预密钥）。
+    /// Encrypt and save the Olm account (identity keys + one-time prekeys) with the KEK.
     pub fn save_account(&mut self, account: &Account) -> Result<(), StoreError> {
         let encrypted = account.pickle().encrypt(&self.kek);
         self.put(ACCOUNT_ENTRY, encrypted.into_bytes());
         Ok(())
     }
 
-    /// 恢复账号；从未保存过时返回 `None`。
+    /// Restore the account; returns `None` when nothing was ever saved.
     pub fn load_account(&self) -> Result<Option<Account>, StoreError> {
         let Some(ciphertext) = self.get(ACCOUNT_ENTRY) else {
             return Ok(None);
@@ -37,7 +37,7 @@ impl Keystore {
         Ok(Some(Account::from(pickle)))
     }
 
-    /// 用 KEK 加密并保存一个 Olm 会话；同一个对端会覆盖旧会话。
+    /// Encrypt and save one Olm session with the KEK; the same peer overwrites the old session.
     pub fn save_session(&mut self, peer: AccountId, session: &Session) -> Result<(), StoreError> {
         let encrypted = session.pickle().encrypt(&self.kek);
         self.put(
@@ -47,7 +47,7 @@ impl Keystore {
         Ok(())
     }
 
-    /// 恢复全部会话，带上各自的对端账号。
+    /// Restore all sessions together with their peer accounts.
     pub fn load_sessions(&self) -> Result<Vec<(AccountId, Session)>, StoreError> {
         let mut sessions = Vec::new();
         for (key, ciphertext) in &self.entries {

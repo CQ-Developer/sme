@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""I1 门禁：迁移与 SQL 查询中不得出现聊天内容列名。
+"""I1 gate: migrations and SQL queries must not contain chat-content column names.
 
-规则：
-  1. migrations/ 下所有 .sql 文件整文件扫描；
-  2. crates/ 下所有 .rs 文件只扫描「看起来是 SQL」的行（含 SELECT/INSERT/... 关键字），
-     避免误伤普通注释与文档。
+Rules:
+  1. every .sql file under migrations/ is scanned in full;
+  2. .rs files under crates/ only have string literals containing SQL keywords scanned,
+     so ordinary identifiers and prose are not mis-flagged.
 
-命中即 CI 失败。schema 断言与 DB dump 金丝雀（I1/I9）在 M3 叠加。
+A hit fails CI. Schema assertions and DB-dump canaries (I1/I9) build on this in M3.
 
-对 `.rs` 的实现说明：只扫描**字符串字面量内部**且含 SQL 关键字的片段，
-避免把 `Message::from()` / `into()` / `values()` 这类普通标识符误判成 SQL。
+Implementation note for `.rs`: only fragments inside **string literals** that contain
+an SQL keyword are scanned, so identifiers such as `Message::from()` / `into()` /
+`values()` are not mistaken for SQL.
 
-用法：check_message_columns.py [仓库根目录]
+Usage: check_message_columns.py [repo root]
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from pathlib import Path
 
 FORBIDDEN = ("message", "content", "body", "payload", "ciphertext", "envelope")
 
-# 用前缀匹配：`message` 也要命中 `messages` / `message_id`，防止绕过。
+# Prefix matching: `message` must also catch `messages` / `message_id` so it cannot be bypassed.
 FORBIDDEN_RE = re.compile(r"\b(" + "|".join(FORBIDDEN) + ")", re.IGNORECASE)
 
 SQL_KEYWORD_RE = re.compile(
@@ -30,7 +31,7 @@ SQL_KEYWORD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Rust 单行字符串字面量（含转义）；运行时查询的 SQL 都写在里面。
+# Rust single-line string literals (escapes included); runtime query SQL lives inside them.
 STRING_LITERAL_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
 

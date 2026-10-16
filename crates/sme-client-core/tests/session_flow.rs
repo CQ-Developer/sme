@@ -1,6 +1,6 @@
-//! 核心状态机的纯离线测试：握手、双向收发、重复投递与缓冲上限。
+//! Pure offline tests for the core state machine: handshake, bidirectional messaging, duplicates and buffer cap.
 //!
-//! 不涉及任何 IO（I2 门禁），服务端交互由 `sme-server` 的集成测试覆盖。
+//! No IO at all (I2 gate); server interaction is covered by `sme-server` integration tests.
 
 use sme_client_core::{Action, Client, CoreError, MESSAGE_BUFFER_LIMIT};
 use sme_proto::{AccountId, Frame, OlmMessageKind, PreKeyBundle};
@@ -14,7 +14,7 @@ fn client_pair() -> (Client, Client, AccountId, AccountId) {
     (alice, bob, alice_id, bob_id)
 }
 
-/// Bob 生成预密钥并交给 Alice 建立出站会话。
+/// Bob generates prekeys and hands one to Alice to build the outbound session.
 fn establish(alice: &mut Client, bob: &mut Client, bob_id: AccountId) {
     let actions = bob.prekey_upload(5);
     let Frame::UploadPreKeys { prekeys } = first_send(actions) else {
@@ -68,7 +68,7 @@ fn handshake_and_bidirectional_messages() {
     ));
     assert_eq!(bob.buffer().len(), 1);
 
-    // Bob → Alice（Bob 已从 pre-key 消息建立入站会话）
+    // Bob -> Alice (Bob already built the inbound session from the pre-key message)
     let Frame::Send(envelope) = first_send(bob.send_text(alice_id, b"hi alice").unwrap()) else {
         panic!("expected Send");
     };

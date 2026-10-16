@@ -1,4 +1,4 @@
-//! I11：落盘的 keystore 必须是密文，且不含身份私钥与消息字节。
+//! I11: the on-disk keystore must be ciphertext and must not contain identity private keys or message bytes.
 
 mod common;
 

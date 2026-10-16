@@ -1,8 +1,8 @@
-//! 本地 keystore：加密落盘身份密钥、Olm 会话、通讯录与 TOFU pin（D13′、D14）。
+//! Local keystore: encrypt identity keys, Olm sessions, contacts and TOFU pins to disk (D13', D14).
 //!
-//! 这是唯一允许写盘的客户端 crate。文件里**不得出现任何消息字节**（I11）：
-//! 负载在写盘前由 [`sme_crypto::seal`] 整体加密，只有口令派生的 KEK 能解开。
-//! 本 crate 不定义「消息」这种字段，调用方放进去的只是带名字的字节。
+//! The only client crate allowed to write to disk. The file **must contain no message bytes** (I11):
+//! The payload is sealed as a whole by [`sme_crypto::seal`] before hitting disk and only the password-derived KEK can open it.
+//! This crate defines no "message" field; callers only put named bytes in.
 
 mod config;
 mod olm;
@@ -17,14 +17,14 @@ use zeroize::Zeroizing;
 
 pub use config::LocalConfig;
 
-/// 文件头 magic：「SME Keystore」。
+/// File magic: "SME Keystore".
 const MAGIC: &[u8; 4] = b"SMEK";
 const VERSION: u8 = 1;
 
-/// magic(4) + version(1) + Argon2id 参数(3×4) + salt(16)。
+/// magic(4) + version(1) + Argon2id params (3x4) + salt(16).
 const HEADER_LEN: usize = 4 + 1 + 12 + SALT_LEN;
 
-/// ChaCha20-Poly1305 的 tag 长度。
+/// ChaCha20-Poly1305 authentication tag length.
 const TAG_LEN: usize = 16;
 
 #[derive(Debug)]
@@ -86,8 +86,8 @@ impl From<vodozemac::PickleError> for StoreError {
     }
 }
 
-/// 内存中的 keystore。磁盘布局：
-/// `magic | version | kdf 参数 | salt | nonce | ciphertext`（前 33 字节是 AEAD 的 AAD）。
+/// In-memory keystore. On-disk layout:
+/// `magic | version | kdf params | salt | nonce | ciphertext` (the first 33 bytes are the AEAD AAD).
 pub struct Keystore {
     path: PathBuf,
     kek: Zeroizing<[u8; KEY_LEN]>,
@@ -97,7 +97,7 @@ pub struct Keystore {
 }
 
 impl Keystore {
-    /// 新建一个空 keystore（不落盘，需显式 [`Keystore::save`]）。
+    /// Create an empty keystore (nothing is written until an explicit [`Keystore::save`]).
     pub fn create(path: impl Into<PathBuf>, password: &[u8]) -> Result<Self, StoreError> {
         let salt = sme_crypto::random_salt()?;
         let kdf = KdfParams::default();
@@ -111,7 +111,7 @@ impl Keystore {
         })
     }
 
-    /// 读盘并用口令打开；口令错误或文件被改都会失败（AEAD 认证）。
+    /// Read from disk and open with the password; a wrong password or tampered file fails AEAD authentication.
     pub fn open(path: impl Into<PathBuf>, password: &[u8]) -> Result<Self, StoreError> {
         let path = path.into();
         let bytes = fs::read(&path)?;
@@ -170,7 +170,7 @@ impl Keystore {
         self.entries.is_empty()
     }
 
-    /// 原子写盘：先写 `*.tmp` 再 rename，Unix 权限 `0600`（docs/INFRA.md §6）。
+    /// Atomic write: write `*.tmp` then rename, Unix mode `0600` (docs/INFRA.md §6).
     pub fn save(&self) -> Result<(), StoreError> {
         let payload = postcard::to_allocvec(&self.entries).map_err(StoreError::Encode)?;
         let header = self.header();
@@ -201,7 +201,7 @@ impl Keystore {
 
         #[cfg(windows)]
         {
-            // Windows 的 rename 不覆盖已存在文件。
+            // Windows rename does not overwrite an existing file.
             if self.path.exists() {
                 fs::remove_file(&self.path)?;
             }
@@ -222,7 +222,7 @@ impl Keystore {
     }
 }
 
-/// 读取已确认长度的头部里的一个 u32。
+/// Read one u32 from a header whose length was already checked.
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&bytes[offset..offset + 4]);

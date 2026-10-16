@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""运行三条 CI 门禁，并各自注入一次违规，验证门禁真的会失败。
+"""Run the three CI gates and inject one violation into each to prove they fail.
 
-正例（仓库现状）必须退出 0；反例（fixtures/ 里的故意违规）必须退出非 0。
-这是 M0 的退出标准之一：门禁不是摆设。
+Positive cases (current repo) must exit 0; negative cases (deliberate violations
+under fixtures/) must exit non-zero. This is one of the M0 exit criteria: the
+gates are not decoration.
 
-用法：run_gates.py
+Usage: run_gates.py
 """
 
 from __future__ import annotations

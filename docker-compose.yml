@@ -22,7 +22,7 @@ services:
       POSTGRES_USER: sme
       POSTGRES_DB: sme
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须显式提供}
-    volumes: [pgdata:/var/lib/postgresql]   # PG 18+ 约定：数据在 <mount>/18/docker，便于 pg_upgrade --link
+    volumes: [pgdata:/var/lib/postgresql]   # PG 18+ convention: data lives in <mount>/18/docker, enabling pg_upgrade --link
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sme -d sme"]
       interval: 5s
@@ -31,12 +31,12 @@ services:
 
   valkey:
     image: valkey/valkey:9.1.2-alpine
-    # ↓ 这几行是「消息零落盘」的部署侧落实，不是可选优化（docs/INFRA.md §5）
+    # ↓ These lines implement "no message ever hits disk" on the deployment side; they are not optional (docs/INFRA.md §5)
     command: >
       valkey-server --save "" --appendonly no
       --dir /data --maxmemory 1gb --maxmemory-policy noeviction
-    tmpfs: [/data]        # 数据目录在内存里：即使误配也只写内存
-    # 注意：valkey 不挂任何持久卷
+    tmpfs: [/data]        # Data directory in memory: even a misconfiguration can only write to RAM
+    # Note: valkey mounts no persistent volume
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 5s

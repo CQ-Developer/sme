@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""I2 门禁：核心 crate 源码里不得出现文件 / 网络 / 进程 / 环境 API。
+"""I2 gate: core crates must not use file / network / process / environment APIs.
 
-扫描范围：crates/sme-crypto、crates/sme-media、crates/sme-proto、crates/sme-client-core。
-命中即退出码 1（CI 失败）。这是「消息零落盘」的第一道防线，第二道在运行时（I4/I11）。
+Scanned crates: sme-crypto, sme-media, sme-proto, sme-client-core.
+A hit exits with code 1 (CI failure). This is the first line of defence for
+"no message ever hits disk"; the runtime line is I4/I11.
 
-用法：check_core_io.py [仓库根目录]
+Usage: check_core_io.py [repo root]
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path
 
 CORE_CRATES = ("sme-crypto", "sme-media", "sme-proto", "sme-client-core")
 
-# 刻意包含 tokio 等价物与常见别名：只过滤完整路径不够。
+# Deliberately include tokio equivalents and common aliases: filtering full paths alone is not enough.
 FORBIDDEN = (
     "std::fs",
     "std::net",

@@ -1,8 +1,8 @@
-//! postcard 编解码：严格拒绝多余字节与超限帧（D4d）。
+//! postcard codec: strictly reject trailing bytes and oversized frames (D4d).
 
 use crate::{Envelope, Frame, MAX_FRAME_BYTES, ProtoError};
 
-/// 编码一帧；字段校验或长度超限时失败，绝不发出非法帧。
+/// Encode one frame; fails on validation or size overflow and never emits an invalid frame.
 pub fn encode(frame: &Frame) -> Result<Vec<u8>, ProtoError> {
     frame.validate()?;
     let bytes = postcard::to_allocvec(frame).map_err(ProtoError::Encode)?;
@@ -12,7 +12,7 @@ pub fn encode(frame: &Frame) -> Result<Vec<u8>, ProtoError> {
     Ok(bytes)
 }
 
-/// 解码一帧；`postcard::from_bytes` 会忽略尾部字节，这里改用 `take_from_bytes` 显式拒绝。
+/// Decode one frame; `postcard::from_bytes` ignores trailing bytes, so this uses `take_from_bytes` and rejects them explicitly.
 pub fn decode(bytes: &[u8]) -> Result<Frame, ProtoError> {
     if bytes.len() > MAX_FRAME_BYTES {
         return Err(ProtoError::TooLarge(bytes.len()));
@@ -26,7 +26,7 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, ProtoError> {
     Ok(frame)
 }
 
-/// 编码一个 [`Envelope`]；Valkey Stream 用它整体存放消息。
+/// Encode an [`Envelope`]; Valkey Streams store messages as one blob.
 pub fn encode_envelope(envelope: &Envelope) -> Result<Vec<u8>, ProtoError> {
     envelope.validate()?;
     let bytes = postcard::to_allocvec(envelope).map_err(ProtoError::Encode)?;
@@ -36,7 +36,7 @@ pub fn encode_envelope(envelope: &Envelope) -> Result<Vec<u8>, ProtoError> {
     Ok(bytes)
 }
 
-/// 解码 [`encode_envelope`] 的输出，拒绝多余字节。
+/// Decode the output of [`encode_envelope`], rejecting trailing bytes.
 pub fn decode_envelope(bytes: &[u8]) -> Result<Envelope, ProtoError> {
     if bytes.len() > MAX_FRAME_BYTES {
         return Err(ProtoError::TooLarge(bytes.len()));

@@ -1,4 +1,4 @@
-# M0 占位：域名、自动证书与 WSS 反代在 M3 落地（D18）。
+# M0 placeholder: domain, automatic certificates and the WSS reverse proxy land in M3 (D18).
 :80 {
 	respond "sme gateway not wired yet"
 }

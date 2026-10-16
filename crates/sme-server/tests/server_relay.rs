@@ -1,7 +1,7 @@
-//! M2/M3 服务端集成测试：注册 → 登录 → 预密钥 → 密文转发 → D-ack。
+//! M2/M3 server integration test: register -> login -> prekeys -> ciphertext relay -> D-ack.
 //!
-//! 需要真实 Postgres（`DATABASE_URL`）与 Docker（临时 Valkey 容器）；
-//! 缺少任一条件时打印提示并跳过。
+//! Requires real Postgres (`DATABASE_URL`) and Docker (temporary Valkey containers);
+//! Prints a note and skips when either dependency is missing.
 
 use sme_proto::{
     AccountId, Envelope, ErrorCode, Frame, OlmMessageKind, PROTOCOL_VERSION, PreKeyUpload,
@@ -20,7 +20,7 @@ const HMAC_KEY: &[u8] = b"test-hmac-key-0123456789abcdef";
 
 static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
-/// 起一个绑定随机端口的网关；返回 URL 与必须保活的 Valkey 容器句柄。
+/// Start a gateway on a random port; returns the URL and a Valkey container handle that must stay alive.
 async fn test_server() -> Option<(String, ValkeyContainer)> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
     let container = match ValkeyContainer::ephemeral().await {
@@ -83,7 +83,7 @@ async fn relay_delivers_only_ciphertext() {
     login(&mut alice_socket, alice_id, &alice).await;
     login(&mut bob_socket, bob_id, &bob).await;
 
-    // Bob 上传一次性预密钥。
+    // Bob uploads one-time prekeys.
     bob.generate_one_time_keys(1);
     let (key_id, one_time_key) = bob
         .one_time_keys()
@@ -106,7 +106,7 @@ async fn relay_delivers_only_ciphertext() {
     }
     bob.mark_keys_as_published();
 
-    // Alice 取回 bundle 并建立 Olm 会话。
+    // Alice fetches the bundle and establishes an Olm session.
     send_frame(
         &mut alice_socket,
         &Frame::FetchPreKey { account_id: bob_id },
@@ -144,7 +144,7 @@ async fn relay_delivers_only_ciphertext() {
         panic!("expected SendAck");
     };
 
-    // 收件人拿到的必须只有密文。
+    // The recipient must receive ciphertext only.
     let Frame::Deliver {
         msg_id: delivered_id,
         envelope: delivered,
@@ -163,7 +163,7 @@ async fn relay_delivers_only_ciphertext() {
         "服务端不得让明文出现在线路上"
     );
 
-    // Bob 用 pre-key 消息建立入站会话并解出明文。
+    // Bob builds the inbound session from the pre-key message and decrypts it.
     let pre_key_message = PreKeyMessage::from_bytes(&delivered.payload).unwrap();
     let inbound = bob
         .create_inbound_session(
@@ -177,7 +177,7 @@ async fn relay_delivers_only_ciphertext() {
 
     send_frame(&mut bob_socket, &Frame::DeliverAck { msg_id }).await;
 
-    // 反向：Bob 回一条 Normal 消息，Alice 必须能解开。
+    // Reverse direction: Bob replies with a normal message and Alice must decrypt it.
     let reply = match bob_session.encrypt("reply from bob").unwrap() {
         OlmMessage::Normal(message) => message,
         OlmMessage::PreKey(_) => panic!("session is established, expected normal message"),
@@ -223,7 +223,7 @@ async fn login_rejects_a_bad_signature() {
     let mut socket = connect(&url).await;
     register(&mut socket, victim_id, &victim).await;
 
-    // Mallory 用自己的密钥签 Victim 的挑战。
+    // Mallory signs Victim's challenge with her own key.
     send_frame(
         &mut socket,
         &Frame::ChallengeRequest {

@@ -1,7 +1,7 @@
-//! M3 不变式测试：I1（schema 无消息列）、I5（日志无密文内容）、
-//! I7（启动自检拒绝持久化）、I8（Valkey 重启后不残留密文）。
+//! M3 invariant tests: I1 (no message columns in the schema), I5 (no ciphertext in logs),
+//! I7 (startup self-check refuses persistence) and I8 (no ciphertext survives a Valkey restart).
 //!
-//! 需要真实 Postgres（`DATABASE_URL`）与 Docker；缺少任一条件时跳过。
+//! Requires real Postgres (`DATABASE_URL`) and Docker; skips when either is missing.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -37,7 +37,7 @@ async fn test_pool() -> Option<sqlx::PgPool> {
     Some(pool)
 }
 
-/// I1：持久层不存在任何消息表 / 消息列。
+/// I1: the persistent layer has no message table or column.
 #[tokio::test]
 async fn i1_persistent_schema_has_no_message_columns() {
     let Some(pool) = test_pool().await else {
@@ -88,7 +88,7 @@ async fn i1_persistent_schema_has_no_message_columns() {
     }
 }
 
-/// I5：把唯一金丝雀放进信封 payload，走完整个生命周期后服务端输出流里不得出现它。
+/// I5: run a unique canary through the envelope payload's whole lifecycle and assert it never reaches server output.
 #[tokio::test]
 async fn i5_server_logs_never_contain_ciphertext_payload() {
     let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
@@ -193,7 +193,7 @@ async fn collect_lines<R: AsyncRead + Unpin>(reader: R, logs: Arc<Mutex<String>>
     }
 }
 
-/// I7：持久化打开时 `Valkey::connect` 必须拒绝；关闭时通过。
+/// I7: `Valkey::connect` must refuse persistence-enabled Valkey and accept it when disabled.
 #[tokio::test]
 async fn i7_startup_refuses_persistent_valkey() {
     let persistent = match ValkeyContainer::with_appendonly().await {
@@ -217,7 +217,7 @@ async fn i7_startup_refuses_persistent_valkey() {
     );
 }
 
-/// I8：密文入队 → Valkey 重启 → 队列为空。
+/// I8: enqueue ciphertext -> restart Valkey -> the queue is empty.
 #[tokio::test]
 async fn i8_restart_leaves_no_ciphertext() {
     let container = match ValkeyContainer::ephemeral().await {
@@ -247,11 +247,11 @@ async fn i8_restart_leaves_no_ciphertext() {
     assert!(!entry_id.is_empty());
     assert_eq!(valkey.queued(account).await.unwrap().len(), 1);
 
-    // D-ack 立即删除（顺带覆盖 ack 脚本）。
+    // D-ack deletes immediately (also exercises the ack script).
     valkey.ack(account, &entry_id).await.unwrap();
     assert!(valkey.queued(account).await.unwrap().is_empty());
 
-    // 再入队一条，重启后必须消失。
+    // Enqueue one more; it must be gone after the restart.
     valkey.enqueue(account, &bytes).await.unwrap();
     drop(valkey);
 

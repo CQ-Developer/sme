@@ -1,7 +1,7 @@
-//! WebSocket 状态机：注册 → 挑战-签名登录 → 预密钥 / 密文转发（M3）。
+//! WebSocket state machine: register -> challenge-signature login -> prekeys / ciphertext relay (M3).
 //!
-//! 网关无状态：队列、预密钥、挑战与 presence 全在 Valkey；本进程只保存活连接。
-//! 帧的 `payload` 不解析、不落日志；所有错误都以 `Frame::Error` 回给对端。
+//! Stateless gateway: queues, prekeys, challenges and presence live in Valkey; this process only holds live connections.
+//! Frame `payload` is never parsed or logged; every error is returned to the peer as `Frame::Error`.
 
 use std::time::Duration;
 
@@ -22,13 +22,13 @@ use crate::state::{
     MESSAGE_RATE_LIMIT_PER_MINUTE,
 };
 
-/// 写方向缓冲深度：够了就行，避免慢客户端吃内存。
+/// Outbound buffer depth: enough to decouple, small enough that slow clients cannot eat memory.
 const WRITE_QUEUE: usize = 128;
 
-/// presence 心跳间隔（docs/INFRA.md §4.1：20s 续期，TTL 60s）。
+/// Presence heartbeat interval (docs/INFRA.md §4.1: refresh every 20s, TTL 60s).
 const PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
 
-/// 每账号每分钟的消息限流窗口。
+/// Message rate-limit window in seconds per account.
 const RATE_WINDOW_SECS: u64 = 60;
 
 pub async fn ws_handler(State(state): State<AppState>, upgrade: WebSocketUpgrade) -> Response {
@@ -83,7 +83,7 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
                     }
                 }
 
-                // 已被本实例的新登录顶替：停止处理旧连接的帧。
+                // Replaced by a newer login on this instance: stop processing frames from the old connection.
                 if let Some(current) = account
                     && !state.is_current_connection(current, conn_id)
                 {
@@ -260,7 +260,7 @@ async fn handle_frame(
             *account = Some(account_id);
             state.mark_known(account_id);
 
-            // D10：同一账号单会话。本实例的直接踢，跨实例的靠 presence + 频道通知。
+            // D10: one session per account. Kick locally; cross-instance kicks go through presence + the channel.
             let previous = state.connections().insert(
                 account_id,
                 Connection {
@@ -283,7 +283,7 @@ async fn handle_frame(
                 Err(error) => eprintln!("presence update failed: {error}"),
             }
 
-            // 订阅唤醒频道；Pub/Sub 丢失不影响正确性，登录时的 flush 会兜底。
+            // Subscribe to the wake-up channel; losing Pub/Sub is fine because login-time flush is the fallback.
             match state.valkey.subscribe(account_id).await {
                 Ok(mut pubsub) => {
                     let state = state.clone();
@@ -306,7 +306,7 @@ async fn handle_frame(
                 Err(error) => eprintln!("pubsub subscribe failed: {error}"),
             }
 
-            // presence 心跳；被顶替后 refresh 返回 false，任务自行退出。
+            // Presence heartbeat; once replaced, refresh returns false and the task exits on its own.
             {
                 let state = state.clone();
                 *presence_task = Some(tokio::spawn(async move {
@@ -451,7 +451,7 @@ async fn handle_frame(
                 return;
             };
 
-            // 大消息在途上限：防止少量 1MB 消息吃光网关内存。
+            // In-flight cap for big messages: a few 1MB messages must not exhaust gateway memory.
             let _permit = if bytes.len() > BIG_MESSAGE_BYTES {
                 match state.big_messages().acquire().await {
                     Ok(permit) => Some(permit),
@@ -493,7 +493,7 @@ async fn handle_frame(
             }
         }
 
-        // 其余帧要么是服务端 → 客户端方向，要么必须已认证；一律按坏帧处理。
+        // All other frames are either server->client only or require authentication; treat them as bad frames.
         Frame::RegisterAck { .. }
         | Frame::Challenge { .. }
         | Frame::LoginAck { .. }
@@ -507,7 +507,7 @@ async fn handle_frame(
     }
 }
 
-/// 把该账号队列里全部未 D-ack 的密文按顺序推给本实例持有的连接。
+/// Push every un-D-acked ciphertext in this account's queue, in order, to the connection held by this instance.
 async fn flush_account(state: &AppState, account: AccountId) {
     let Some(connection) = state.connections().get(&account).cloned() else {
         return;

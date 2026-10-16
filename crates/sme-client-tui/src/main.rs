@@ -1,13 +1,13 @@
-//! ratatui 参考客户端（M4，仅文本）。
+//! ratatui reference client (M4, text only).
 //!
-//! 热键：
-//! - `Enter`：口令界面解锁 / 聊天界面发送
-//! - `/peer <账号ID>`：选择对端并拉取一次性预密钥
-//! - `Ctrl+X`：紧急擦除（内存 + keystore）并退出
-//! - `Esc` / `Ctrl+C`：正常退出
-//! - 空闲 5 分钟自动锁定，内存中的明文与会话被擦除
+//! Hotkeys:
+//! - `Enter`: unlock on the password screen / send on the chat screen
+//! - `/peer <account-id>`: pick a peer and fetch a one-time prekey
+//! - `Ctrl+X`: emergency wipe (memory + keystore) and exit
+//! - `Esc` / `Ctrl+C`: normal exit
+//! - Auto-lock after 5 minutes idle wipes in-memory plaintext and sessions
 //!
-//! 明文只存在于 `sme-client-core` 的内存缓冲与本界面的渲染字符串里。
+//! Plaintext exists only in the `sme-client-core` buffer and in this UI's render-time strings.
 
 use std::io::Stdout;
 use std::path::PathBuf;
@@ -25,10 +25,10 @@ use sme_client_tui::session::{Event, Session};
 use sme_proto::AccountId;
 use zeroize::Zeroizing;
 
-/// 空闲多久自动锁定。
+/// How long until an idle session auto-locks.
 const IDLE_LIMIT: Duration = Duration::from_secs(5 * 60);
 
-/// UI 界面上保留的消息条数（与核心缓冲一致）。
+/// Number of messages kept in the UI list (matches the core buffer).
 const UI_MESSAGE_LIMIT: usize = 10;
 
 struct App {
@@ -173,7 +173,7 @@ async fn connect(app: &mut App) {
     match Session::connect(&app.server, &app.keystore_path, app.password.as_bytes()).await {
         Ok(mut session) => {
             app.status = format!("已登录 {}", session.account_id());
-            // 顺手上传一批一次性预密钥，供对端发起握手。
+            // Also upload a batch of one-time prekeys so peers can start a handshake.
             let _ = session
                 .upload_prekeys(sme_client_tui::session::PREKEY_BATCH)
                 .await;

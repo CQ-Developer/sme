@@ -1,7 +1,7 @@
-//! 不含秘密的本地配置（docs/INFRA.md §6）：账号 ID、口令盐与 Argon2id 参数。
+//! Secret-free local config (docs/INFRA.md §6): account ID, password salt and Argon2id parameters.
 //!
-//! 放在 keystore 旁边（`<keystore>.config.json`）。里面没有任何秘密：
-//! 即使被读走，也只能看到「这个人是谁」，看不到消息，也打不开 keystore。
+//! Stored next to the keystore (`<keystore>.config.json`). It holds no secrets:
+//! even if read by someone else it only reveals who the user is, not any message, and cannot open the keystore.
 
 use std::fs;
 use std::io::Write;
@@ -12,7 +12,7 @@ use sme_proto::{AccountId, KdfParams};
 
 use crate::StoreError;
 
-/// 本地配置。
+/// Local config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalConfig {
     pub account_id: AccountId,
@@ -21,7 +21,7 @@ pub struct LocalConfig {
 }
 
 impl LocalConfig {
-    /// 首次启动：随机账号 ID（D16）与随机口令盐。
+    /// First run: random account ID (D16) and random password salt.
     pub fn new_random() -> Result<Self, StoreError> {
         let account_id = AccountId::random();
         let kdf_salt = sme_crypto::random_salt().map_err(StoreError::Crypto)?;
@@ -36,12 +36,12 @@ impl LocalConfig {
         })
     }
 
-    /// 配置文件名由 keystore 路径派生。
+    /// Derive the config file name from the keystore path.
     pub fn path_for(keystore_path: &Path) -> PathBuf {
         keystore_path.with_extension("config.json")
     }
 
-    /// 读取配置；文件不存在时返回 `None`（首次运行）。
+    /// Read the config; returns `None` when the file is missing (first run).
     pub fn load(keystore_path: &Path) -> Result<Option<Self>, StoreError> {
         let path = Self::path_for(keystore_path);
         if !path.exists() {
@@ -53,7 +53,7 @@ impl LocalConfig {
             .map_err(|_| StoreError::Corrupt("config.json is not valid JSON"))
     }
 
-    /// 原子写入，Unix 权限 `0600`。
+    /// Atomic write with Unix mode `0600`.
     pub fn save(&self, keystore_path: &Path) -> Result<(), StoreError> {
         let path = Self::path_for(keystore_path);
         if let Some(parent) = path.parent()

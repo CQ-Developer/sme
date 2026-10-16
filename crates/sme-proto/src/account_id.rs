@@ -1,21 +1,21 @@
-//! 账号 ID：128-bit 随机，base32 26 字符（D16），用于防用户名枚举。
+//! Account IDs: 128-bit random, 26 base32 characters (D16), preventing username enumeration.
 //!
-//! 编码使用 RFC 4648 的 `A–Z2–7` 字母表、不带 padding；解码拒绝非规范写法
-//! （最后一字符的低位必须为 0），保证一个 ID 只有一个合法字符串。
+//! Encoding uses the RFC 4648 `A-Z2-7` alphabet without padding; decoding rejects non-canonical forms
+//! (the low bits of the last character must be zero) so each ID has exactly one valid spelling.
 
 use serde::{Deserialize, Serialize};
 
 use crate::ProtoError;
 
-/// 账号 ID 的字节长度。
+/// Byte length of an account ID.
 pub const ACCOUNT_ID_LEN: usize = 16;
 
-/// 账号 ID 的 base32 字符串长度。
+/// Base32 string length of an account ID.
 pub const ACCOUNT_ID_BASE32_LEN: usize = 26;
 
 const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
-/// 128-bit 随机的账号标识；服务端与客户端都只把它当作不透明字符串。
+/// 128-bit random account identifier; both server and client treat it as an opaque string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AccountId([u8; ACCOUNT_ID_LEN]);
 
@@ -28,10 +28,10 @@ impl AccountId {
         &self.0
     }
 
-    /// 生成一个新的随机账号 ID。
+    /// Generate a new random account ID.
     pub fn random() -> Self {
         let mut bytes = [0u8; ACCOUNT_ID_LEN];
-        // RNG 不可用时宁可终止进程，也不要生成可预测的账号 ID。
+        // If the RNG is unavailable, abort rather than generate a predictable account ID.
         getrandom::fill(&mut bytes).expect("OS random source unavailable");
         Self(bytes)
     }
@@ -106,7 +106,7 @@ fn decode_base32(input: &str) -> Result<Vec<u8>, ProtoError> {
         }
     }
 
-    // 非规范编码：剩余位必须为 0，否则同一个 ID 会有多种写法。
+    // Non-canonical encoding: leftover bits must be zero, or one ID would have several spellings.
     if bits > 0 && (buffer & ((1 << bits) - 1)) != 0 {
         return Err(ProtoError::InvalidAccountId);
     }
@@ -138,11 +138,11 @@ mod tests {
     fn rejects_bad_ids() {
         assert!(AccountId::parse_base32("").is_err());
         assert!(AccountId::parse_base32("AAAAAAAAAAAAAAAAAAAAAAAAAA").is_ok());
-        // 长度不对
+        // Wrong length
         assert!(AccountId::parse_base32("AAAAAAAAAAAAAAAAAAAAAAAAA").is_err());
-        // 非法字符（0/1/8/9 不在 base32 字母表里）
+        // Invalid characters (0/1/8/9 are not in the base32 alphabet)
         assert!(AccountId::parse_base32("AAAAAAAAAAAAAAAAAAAAAAAA01").is_err());
-        // 最后一位非规范（低 2 位不为 0）：'B' 的 index=1，所有合法 ID 的最后一位都不会是它
+        // Non-canonical last character (low 2 bits non-zero): 'B' has index=1 and can never end a valid ID
         let id = AccountId::random();
         let mut text = id.to_base32();
         text.pop();

@@ -1,8 +1,8 @@
-//! 无 UI 的客户端会话：连接、注册/登录、收发、持久化与擦除。
+//! Headless client session: connect, register/login, send/receive, persist and wipe.
 //!
-//! 这是 TUI（以及将来桌面/移动外壳）共用的运行时：它把
-//! `sme-client-net`（传输）、`sme-client-core`（Olm 状态机）与
-//! `sme-client-store`（keystore）拼起来，向 UI 暴露 [`Event`] 与几个操作。
+//! Runtime shared by the TUI (and future desktop/mobile shells): it wires
+//! `sme-client-net` (transport), `sme-client-core` (Olm state machine) and
+//! `sme-client-store` (keystore) into one runtime that exposes [`Event`] and a few operations to the UI.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use sme_client_net::{NetError, Transport};
 use sme_client_store::{Keystore, LocalConfig, StoreError};
 use sme_proto::{AccountId, ErrorCode};
 
-/// 每次上传的一次性预密钥数量。
+/// Number of one-time prekeys per upload.
 pub const PREKEY_BATCH: usize = 5;
 
 #[derive(Debug)]
@@ -70,7 +70,7 @@ impl From<NetError> for SessionError {
     }
 }
 
-/// 给 UI 的事件；`text` 是 UI 边界的字符串副本（无法完全擦除，见 plan.md §11）。
+/// Events for the UI; `text` is a string copy at the UI boundary (not fully wipeable, see plan.md §11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Registered,
@@ -84,7 +84,7 @@ pub enum Event {
     ProtocolError { detail: &'static str },
 }
 
-/// 一条登录好的客户端会话。
+/// A logged-in client session.
 pub struct Session {
     client: Client,
     keystore: Keystore,
@@ -95,7 +95,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// 打开（或创建）keystore、连接服务器、注册（幂等）并登录。
+    /// Open (or create) the keystore, connect to the server, register (idempotently) and log in.
     pub async fn connect(
         url: &str,
         keystore_path: &Path,
@@ -132,7 +132,7 @@ impl Session {
         };
         session.persist()?;
 
-        // 注册是幂等的：已注册时服务端回 AlreadyRegistered，同样继续登录。
+        // Registration is idempotent: an AlreadyRegistered reply still proceeds to login.
         let actions = session
             .client
             .registration(session.config.kdf_salt, session.config.kdf_params);
@@ -174,12 +174,12 @@ impl Session {
         &self.client
     }
 
-    /// 内存中的明文缓冲（≤10 条，永不落盘）。
+    /// In-memory plaintext buffer (10 entries max, never written to disk).
     pub fn messages(&self) -> &MessageBuffer<ReceivedMessage> {
         self.client.buffer()
     }
 
-    /// 处理网络帧直到产出下一个 UI 事件。
+    /// Process network frames until the next UI event is produced.
     pub async fn next_event(&mut self) -> Result<Event, SessionError> {
         loop {
             if let Some(event) = self.events.pop_front() {
@@ -220,13 +220,13 @@ impl Session {
         Ok(())
     }
 
-    /// 紧急擦除内存：明文缓冲、会话与待处理事件。
+    /// Emergency memory wipe: plaintext buffer, sessions and pending events.
     pub fn wipe_memory(&mut self) {
         self.client.wipe();
         self.events.clear();
     }
 
-    /// 危险操作：删除 keystore 与本地配置（紧急擦除快捷键用）。
+    /// Dangerous: delete the keystore and local config (used by the emergency-wipe hotkey).
     pub fn delete_keystore(&self) -> Result<(), SessionError> {
         for path in [
             self.keystore_path.clone(),

@@ -1,9 +1,9 @@
-//! 客户端核心状态机：Olm 握手、加解密、内存缓冲与持久化信号。
+//! Client core state machine: Olm handshake, encryption/decryption, in-memory buffer and persist signals.
 //!
-//! 输入输出只有 [`sme_proto::Frame`] 与 [`Action`]：
-//! - `Action::Send` 交给 `sme-client-net` 发送；
-//! - `Action::Persist` 时调用方把 `account()` / `sessions()` 写进 keystore；
-//! - 其余是给 UI 的事件。
+//! Its only inputs and outputs are [`sme_proto::Frame`] and [`Action`]:
+//! - `Action::Send` is handed to `sme-client-net` for sending;
+//! - On `Action::Persist` the caller writes `account()` / `sessions()` into the keystore;
+//! - The rest are events for the UI.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +19,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::MessageBuffer;
 
-/// 一条已解密、进入内存缓冲的消息。
+/// A decrypted message that entered the in-memory buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedMessage {
     pub from: AccountId,
@@ -40,41 +40,41 @@ impl Drop for ReceivedMessage {
 
 impl ZeroizeOnDrop for ReceivedMessage {}
 
-/// 交给调用方执行的动作。
+/// An action for the caller to perform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// 立即通过 `sme-client-net` 发出。
+    /// Send immediately through `sme-client-net`.
     Send(Frame),
-    /// 新解密出的明文（已进入内存缓冲）。
+    /// Newly decrypted plaintext (already in the in-memory buffer).
     Received {
         msg_id: String,
         from: AccountId,
         plaintext: Zeroizing<Vec<u8>>,
     },
-    /// 解密失败（如重复投递）；已回 D-ack，不显示。
+    /// Decryption failed (e.g. duplicate delivery); D-acked but not shown.
     DecryptFailed {
         msg_id: String,
         from: AccountId,
     },
-    /// 收不到/看不懂的帧；只记录，不影响连接。
+    /// A frame we cannot receive or understand; recorded only, without affecting the connection.
     ProtocolError {
         detail: &'static str,
     },
     Registered,
-    /// 一次性预密钥已上传（`stored` 是服务端保存的总数）。
+    /// One-time prekeys were uploaded (`stored` is the total kept server-side).
     PreKeysUploaded {
         stored: u16,
     },
-    /// 与对端的 Olm 会话已建立。
+    /// The Olm session with the peer is established.
     SessionEstablished {
         peer: AccountId,
     },
-    /// 一条消息已被服务端接管（Q-ack）。
+    /// A message has been taken over by the server (Q-ack).
     Sent {
         msg_id: String,
     },
     Ready,
-    /// 账号或会话状态有变化；调用方应写 keystore。
+    /// Account or session state changed; the caller should persist to the keystore.
     Persist,
     ServerError {
         code: ErrorCode,
@@ -114,7 +114,7 @@ impl std::error::Error for CoreError {
     }
 }
 
-/// 客户端核心：身份、Olm 会话与明文缓冲。
+/// Client core: identity, Olm sessions and the plaintext buffer.
 pub struct Client {
     account_id: AccountId,
     account: Account,
@@ -132,12 +132,12 @@ impl Client {
         }
     }
 
-    /// 首次注册：生成随机身份（D14）。
+    /// First registration: generate a random identity (D14).
     pub fn generate(account_id: AccountId) -> Self {
         Self::new(account_id, Account::new())
     }
 
-    /// 从 keystore 恢复身份与会话（M1 的持久化格式）。
+    /// Restore identity and sessions from the keystore (the M1 persistence format).
     pub fn restore(
         account_id: AccountId,
         account: Account,
@@ -159,7 +159,7 @@ impl Client {
         &self.account
     }
 
-    /// 已建立的会话与各自的对端，供调用方写入 keystore。
+    /// Established sessions with their peers, for the caller to persist.
     pub fn sessions(&self) -> impl Iterator<Item = (AccountId, &Session)> {
         self.sessions.iter().map(|(peer, session)| (*peer, session))
     }
@@ -185,7 +185,7 @@ impl Client {
         })]
     }
 
-    /// 生成一批一次性预密钥并标记为已发布；由调用方上传。
+    /// Generate a batch of one-time prekeys and mark them published; the caller uploads them.
     pub fn prekey_upload(&mut self, count: usize) -> Vec<Action> {
         self.account.generate_one_time_keys(count);
         let prekeys = self
@@ -209,7 +209,7 @@ impl Client {
         vec![Action::Send(Frame::FetchPreKey { account_id: peer })]
     }
 
-    /// 用现有会话加密一条文本/字节消息。
+    /// Encrypt a text/byte message with the existing session.
     pub fn send_text(
         &mut self,
         peer: AccountId,
@@ -237,13 +237,13 @@ impl Client {
         Ok(vec![Action::Send(Frame::Send(envelope)), Action::Persist])
     }
 
-    /// 紧急擦除：清空明文缓冲与会话（vodozemac 的密钥类型在 drop 时自行擦除）。
+    /// Emergency wipe: clear the plaintext buffer and sessions (vodozemac key types wipe themselves on drop).
     pub fn wipe(&mut self) {
         self.buffer.clear();
         self.sessions.clear();
     }
 
-    /// 处理一帧服务端消息；返回调用方需要执行的动作。
+    /// Handle one server frame; returns the actions the caller must perform.
     pub fn handle_frame(&mut self, frame: Frame) -> Vec<Action> {
         match frame {
             Frame::RegisterAck { .. } => vec![Action::Registered],
@@ -316,13 +316,13 @@ impl Client {
                     msg_id: msg_id.clone(),
                     from,
                 },
-                // 重复投递会消耗掉的消息密钥：也必须 D-ack，否则服务端会一直重投
+                // Duplicate delivery consumed the message key: still D-ack, or the server keeps redelivering
                 Action::Send(Frame::DeliverAck { msg_id }),
             ],
         }
     }
 
-    /// 解密一个信封；返回 `(plaintext, 是否改动了本地状态)`。
+    /// Decrypt one envelope; returns `(plaintext, local state changed)`.
     fn decrypt(&mut self, envelope: &Envelope) -> Result<(Vec<u8>, bool), CoreError> {
         if envelope.to != self.account_id {
             return Err(CoreError::BadEnvelope(
@@ -333,7 +333,7 @@ impl Client {
 
         match envelope.kind {
             OlmMessageKind::PreKey => {
-                // 重复投递或乱序：先试已有会话。
+                // Duplicate or out-of-order delivery: try the existing session first.
                 if let Some(session) = self.sessions.get_mut(&from)
                     && let Ok(message) = PreKeyMessage::from_bytes(&envelope.payload)
                     && let Ok(plaintext) = session.decrypt(&OlmMessage::PreKey(message))

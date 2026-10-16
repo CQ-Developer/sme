@@ -1,3 +1,3 @@
-//! uniffi 绑定层：一份接口生成 Swift / Kotlin 绑定（D4b）。
+//! uniffi binding layer: one interface generating Swift / Kotlin bindings (D4b).
 //!
-//! M0 只有骨架；M5 导出客户端核心 API。
+//! M0 skeleton only; M5 exports the client core API.

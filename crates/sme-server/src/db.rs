@@ -1,18 +1,18 @@
-//! 账号持久层：唯一业务表 `accounts`（docs/INFRA.md §3）。
+//! Account persistence: the single business table `accounts` (docs/INFRA.md §3).
 //!
-//! 查询用运行时的 `query_as`（D25 方案 A）；字段名门禁与迁移审查（I1）兜底。
+//! Queries use runtime `query_as` (D25 option A); the column-name gate and migration review (I1) back it up.
 
 use sme_proto::{AccountId, Registration};
 use sqlx::PgPool;
 
-/// 从 `accounts` 读出的身份公钥。
+/// Identity public keys read from `accounts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoredAccount {
     pub ed25519_pub: [u8; 32],
     pub curve25519_pub: [u8; 32],
 }
 
-/// 注册一个账号；已存在时返回 `false`（不覆盖任何字段）。
+/// Register an account; returns `false` when it already exists (no fields overwritten).
 pub async fn insert_account(
     pool: &PgPool,
     registration: &Registration,
@@ -41,7 +41,7 @@ pub async fn insert_account(
     Ok(result.rows_affected() == 1)
 }
 
-/// 读取账号身份公钥；不存在或数据长度异常时返回 `None`。
+/// Read identity public keys; returns `None` when missing or of unexpected length.
 pub async fn load_account(
     pool: &PgPool,
     account_id: AccountId,

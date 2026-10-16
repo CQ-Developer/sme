@@ -1,7 +1,7 @@
-//! WebSocket 传输：客户端唯一允许网络的 crate（plan.md §5）。
+//! WebSocket transport: the client's only network-enabled crate (plan.md §5).
 //!
-//! 只负责把 [`sme_proto::Frame`] 编码后发出、把收到的字节解码成帧；
-//! 不做加密、不持有会话状态、不落盘。
+//! It only encodes [`sme_proto::Frame`] for sending and decodes received bytes into frames;
+//! No encryption, no session state, nothing written to disk.
 
 use futures_util::{SinkExt, StreamExt};
 use sme_proto::{Frame, ProtoError, decode, encode};
@@ -9,7 +9,7 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-/// 一条 WebSocket 连接。
+/// A WebSocket connection.
 pub struct Transport {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
 }
@@ -60,7 +60,7 @@ impl Transport {
             .map_err(NetError::Transport)
     }
 
-    /// 收到下一帧；连接正常关闭时返回 `Ok(None)`。
+    /// Receive the next frame; returns `Ok(None)` when the connection closes cleanly.
     pub async fn recv(&mut self) -> Result<Option<Frame>, NetError> {
         loop {
             match self.socket.next().await {

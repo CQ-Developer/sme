@@ -1,7 +1,7 @@
-//! I6：消息与会话相关类型必须声明为「drop 时零化」。
+//! I6: message and session types must be declared zero-on-drop.
 //!
-//! 内存擦除的完整证明超出单元测试能力（`mlock`/core dump 是尽力项），
-//! 这里锁住的是类型层面的契约：任何持有明文的类型都必须带 `ZeroizeOnDrop`。
+//! Fully proving memory wiping is beyond unit tests (`mlock` / core dumps are best-effort),
+//! This pins the type-level contract: every type holding plaintext must implement `ZeroizeOnDrop`.
 
 use sme_client_core::ReceivedMessage;
 use zeroize::ZeroizeOnDrop;

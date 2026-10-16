@@ -1,4 +1,4 @@
-//! 测试用的自清理临时目录；避免引入额外 dev-dependency。
+//! Self-cleaning temp directory for tests; avoids an extra dev-dependency.
 #![allow(dead_code)]
 
 use std::fs;

@@ -1,17 +1,17 @@
-//! 启动配置：全部来自环境变量，无配置文件。
+//! Startup config comes entirely from environment variables; there is no config file.
 
 use std::net::SocketAddr;
 
-/// 网关配置。
+/// Gateway config.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// 监听地址，默认 `127.0.0.1:8080`（生产由 compose 指定）。
+    /// Listen address, default `127.0.0.1:8080` (set by compose in production).
     pub bind: SocketAddr,
-    /// Postgres 连接串。
+    /// Postgres connection string.
     pub database_url: String,
-    /// Valkey 连接串，默认 `redis://127.0.0.1:6379`。
+    /// Valkey connection string, default `redis://127.0.0.1:6379`.
     pub valkey_url: String,
-    /// D17 的服务端 HMAC 密钥；生产用 `openssl rand -hex 32` 生成。
+    /// D17 server HMAC key; generate with `openssl rand -hex 32` in production.
     pub hmac_key: String,
 }
 
