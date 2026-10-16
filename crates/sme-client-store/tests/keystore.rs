@@ -1,39 +1,15 @@
 //! I11：落盘的 keystore 必须是密文，且不含身份私钥与消息字节。
 
-use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
+use std::fs;
+
+use common::TestDir;
 use sme_client_store::Keystore;
 
 const PASSWORD: &[u8] = b"correct horse battery staple";
 const IDENTITY_CANARY: [u8; 32] = [0x5a; 32];
 const MESSAGE_CANARY: &[u8] = b"CANARY-sme-msg-7f3a91d2-must-not-reach-disk";
-
-/// 自清理的临时目录，避免引入额外 dev-dependency。
-struct TestDir(PathBuf);
-
-impl TestDir {
-    fn new(name: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("sme-{name}-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-
-    fn join(&self, name: &str) -> PathBuf {
-        self.0.join(name)
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()

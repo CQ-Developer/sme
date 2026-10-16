@@ -12,4 +12,5 @@ argon2 = { version = "0.5", features = ["std"] }
 chacha20poly1305 = "0.10"
 getrandom = "0.3"
 postcard = { version = "1", features = ["alloc"] }
+vodozemac = "0.11.1"
 zeroize = { version = "1", features = ["alloc"] }

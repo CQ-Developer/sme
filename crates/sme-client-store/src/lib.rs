@@ -4,6 +4,8 @@
 //! 负载在写盘前由 [`sme_crypto::seal`] 整体加密，只有口令派生的 KEK 能解开。
 //! 本 crate 不定义「消息」这种字段，调用方放进去的只是带名字的字节。
 
+mod olm;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -26,6 +28,7 @@ const TAG_LEN: usize = 16;
 pub enum StoreError {
     Io(std::io::Error),
     Crypto(CryptoError),
+    Pickle(vodozemac::PickleError),
     Encode(postcard::Error),
     Decode(postcard::Error),
     NotAKeystore,
@@ -38,6 +41,7 @@ impl std::fmt::Display for StoreError {
         match self {
             Self::Io(error) => write!(f, "keystore I/O failed: {error}"),
             Self::Crypto(error) => write!(f, "keystore crypto failed: {error}"),
+            Self::Pickle(error) => write!(f, "olm pickle failed: {error}"),
             Self::Encode(error) => write!(f, "keystore encode failed: {error}"),
             Self::Decode(error) => write!(f, "keystore decode failed: {error}"),
             Self::NotAKeystore => write!(f, "not a sme keystore file"),
@@ -54,6 +58,7 @@ impl std::error::Error for StoreError {
         match self {
             Self::Io(error) => Some(error),
             Self::Crypto(error) => Some(error),
+            Self::Pickle(error) => Some(error),
             Self::Encode(error) | Self::Decode(error) => Some(error),
             _ => None,
         }
@@ -69,6 +74,12 @@ impl From<std::io::Error> for StoreError {
 impl From<CryptoError> for StoreError {
     fn from(error: CryptoError) -> Self {
         Self::Crypto(error)
+    }
+}
+
+impl From<vodozemac::PickleError> for StoreError {
+    fn from(error: vodozemac::PickleError) -> Self {
+        Self::Pickle(error)
     }
 }
 

@@ -9,6 +9,7 @@
 > - v0.5：**D14=A + D13′=B′ 确认**。密钥材料改为「随机生成一次 + 口令派生 KEK 加密落盘」，§6.1 的 D12 分层删除；**D2 修订**（会话状态不再纯内存）；新增 `sme-client-store` crate、不变式 I11；通讯录与 pin 改存客户端本地，服务端持久层只剩账号数据。
 > - v0.6：v1 范围收敛为**文本 + 图片**（图片 ≤1MB，客户端压缩并剥离 EXIF；不支持文件与视频）；**取消 E2EE-ack 与已读回执**（D22：双方互相感知不到状态）；D7 修订为 TTL 24 小时 + 字节配额；确认 v1 不接入任何推送（D19）；新增 I12、`sme-media` crate；基础设施规格见 `docs/INFRA.md`。
 > - v0.7：M0 落地（workspace 骨架 + 三条 CI 门禁 + compose/migration + I3/I11 测试）；新增 D23（keystore AEAD）与 D24（Argon2id 默认参数）。
+> - v0.8：M1 完成——Olm 账号与会话经 KEK 加密跨重启恢复（条目 `olm.account` / `olm.session.<id>`），Argon2id 通过官方参考实现的 KAT。
 
 ## 1. 产品定位（一句话）
 
@@ -273,7 +274,7 @@ Cargo workspace（Rust）
 
 ### 10.2 待定
 
-无待定项。M0 已完成（v0.7），下一步 M1。
+无待定项。M1 已完成（v0.8），下一步 M2。
 
 ## 11. 持久化策略（D11 / D13）
 
@@ -356,8 +357,9 @@ D2 修订后，会话状态可跨启动恢复，移动端进程被杀不再意�
    - `docs/THREAT_MODEL.md` — 威胁模型与残余风险
    - `docs/INFRA.md` — 基础设施规格（Postgres 18.6 / Valkey 9.1.2 / Caddy / 配额 / compose）
 2. M0 ✅（v0.7）：workspace 骨架、三条 CI 门禁（I1 字段名 / I2 核心禁词 / Valkey 禁持久化，均含注入自检）、compose + `accounts` migration、I3/I11 测试。
-3. 下一步进 M1：KEK 派生（Argon2id）、身份密钥生成、Olm 账号与会话的加密落盘/恢复（公开 API `pickle` / `AccountPickle::encrypt`）。
-4. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
+3. M1 ✅（v0.8）：Olm 账号/会话跨重启恢复（`sme-client-store::save_account` / `load_account` / `save_session` / `load_session`，走 vodozemac 公开 pickle API），Argon2id KAT（含 p>1 向量）。
+4. 下一步进 M2：`sme-client-net` + 服务端 axum 网关，打通 1:1 实时聊天（信封 `sme-proto`、postcard、队列语义）。
+5. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
 
 ## 14. 附录：D4e 验证记录与本地环境
 

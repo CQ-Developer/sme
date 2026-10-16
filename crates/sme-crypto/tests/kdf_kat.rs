@@ -1,0 +1,67 @@
+//! Argon2id 已知答案测试（KAT）：把 `sme-crypto` 的 KEK 派生钉在官方参考实现上。
+//!
+//! 向量由 pHC winner 参考实现（argon2 CLI，v19）生成，复现命令：
+//!
+//! ```text
+//! docker run --rm alpine:3.22 sh -c '
+//!   apk add -q argon2 >/dev/null &&
+//!   printf "password" | argon2 somesaltsomesalt -id -t 2 -m 12 -p 1 -l 32 -r'
+//! docker run --rm alpine:3.22 sh -c '
+//!   apk add -q argon2 >/dev/null &&
+//!   printf "password" | argon2 0123456789abcdef -id -t 3 -m 10 -p 2 -l 32 -r'
+//! ```
+
+use sme_crypto::{KdfParams, derive_kek};
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+fn matches_reference_vector() {
+    let salt = *b"somesaltsomesalt";
+    let params = KdfParams {
+        m_cost: 4096,
+        t_cost: 2,
+        p_cost: 1,
+    };
+
+    let kek = derive_kek(b"password", &salt, &params).unwrap();
+
+    assert_eq!(
+        hex(&kek[..]),
+        "1f99999fc42c145c27b4f92d75b8c636da81f830c9fa78b1abde2e240668a889"
+    );
+}
+
+/// 第二组覆盖并行度 p > 1，防止实现把 p_cost 丢掉。
+#[test]
+fn matches_reference_vector_with_parallelism() {
+    let salt = *b"0123456789abcdef";
+    let params = KdfParams {
+        m_cost: 1024,
+        t_cost: 3,
+        p_cost: 2,
+    };
+
+    let kek = derive_kek(b"password", &salt, &params).unwrap();
+
+    assert_eq!(
+        hex(&kek[..]),
+        "d7d0ade95873dc8c1a514910cb3cd8b5b7c90e074922282c232858c6d47d54dd"
+    );
+}
+
+#[test]
+fn salt_changes_the_kek() {
+    let params = KdfParams {
+        m_cost: 1024,
+        t_cost: 1,
+        p_cost: 1,
+    };
+
+    let first = derive_kek(b"password", b"aaaaaaaaaaaaaaaa", &params).unwrap();
+    let second = derive_kek(b"password", b"bbbbbbbbbbbbbbbb", &params).unwrap();
+
+    assert_ne!(first[..], second[..]);
+}
