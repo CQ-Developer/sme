@@ -9,7 +9,7 @@ jobs:
     name: 不变式门禁（I1 / I2 / Valkey 禁持久化）
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: 准备 Python 依赖（PyYAML）
         run: python3 -c 'import yaml' || python3 -m pip install pyyaml
       - name: 运行门禁与注入自检
@@ -19,7 +19,7 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
