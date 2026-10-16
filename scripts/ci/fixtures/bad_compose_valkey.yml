@@ -1,0 +1,6 @@
+# Valkey 落盘反例：挂持久卷 + 打开 AOF + 没有 tmpfs，门禁必须全部报出来。
+services:
+  valkey:
+    image: valkey/valkey:9.1.2-alpine
+    command: valkey-server --save 900 1 --appendonly yes --maxmemory 1gb --maxmemory-policy noeviction
+    volumes: [/var/lib/valkey]

@@ -1,0 +1,48 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+
+  gateway:
+    build: .
+    environment:
+      DATABASE_URL: postgres://sme:${POSTGRES_PASSWORD:?必须显式提供}@postgres/sme
+      VALKEY_URL: redis://valkey:6379
+      SME_HMAC_KEY: ${SME_HMAC_KEY:?必须显式提供}
+    depends_on:
+      postgres: {condition: service_healthy}
+      valkey:   {condition: service_healthy}
+
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_USER: sme
+      POSTGRES_DB: sme
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须显式提供}
+    volumes: [pgdata:/var/lib/postgresql]   # PG 18+ 约定：数据在 <mount>/18/docker，便于 pg_upgrade --link
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sme -d sme"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:9.1.2-alpine
+    # ↓ 这几行是「消息零落盘」的部署侧落实，不是可选优化（docs/INFRA.md §5）
+    command: >
+      valkey-server --save "" --appendonly no
+      --dir /data --maxmemory 1gb --maxmemory-policy noeviction
+    tmpfs: [/data]        # 数据目录在内存里：即使误配也只写内存
+    # 注意：valkey 不挂任何持久卷
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata: {}
+  caddy_data: {}

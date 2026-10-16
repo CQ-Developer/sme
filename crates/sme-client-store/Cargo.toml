@@ -1,0 +1,10 @@
+[package]
+name = "sme-client-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+postcard = { workspace = true }
+sme-crypto = { path = "../sme-crypto" }
+zeroize = { workspace = true }
