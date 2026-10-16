@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::account_id::AccountId;
 use crate::{
-    MAX_ENVELOPE_PAYLOAD, MAX_ERROR_DETAIL_LEN, MAX_KEY_ID_LEN, MAX_PREKEYS_PER_UPLOAD,
-    MAX_SESSION_ID_LEN, PROTOCOL_VERSION, ProtoError,
+    MAX_ENVELOPE_PAYLOAD, MAX_ERROR_DETAIL_LEN, MAX_KEY_ID_LEN, MAX_MSG_ID_LEN,
+    MAX_PREKEYS_PER_UPLOAD, MAX_SESSION_ID_LEN, PROTOCOL_VERSION, ProtoError,
 };
 
 /// 注册时提交的 Argon2id 参数（服务端按 docs/INFRA.md §3 存成 JSONB）。
@@ -141,6 +141,7 @@ pub enum Frame {
     },
     Login {
         account_id: AccountId,
+        nonce: [u8; 32],
         signature: Signature,
     },
     LoginAck {
@@ -160,16 +161,16 @@ pub enum Frame {
 
     /// 发送一条加密消息；服务端接管后回 `SendAck`（Q-ack）。
     Send(Envelope),
-    /// 服务端投递一条消息；接收方回 `DeliverAck`（D-ack）后服务端才删除。
+    /// 服务端投递一条消息；`msg_id` 是 Valkey Stream 的条目 ID，接收方 D-ack 后服务端据此删除。
     Deliver {
-        msg_id: u64,
+        msg_id: String,
         envelope: Envelope,
     },
     SendAck {
-        msg_id: u64,
+        msg_id: String,
     },
     DeliverAck {
-        msg_id: u64,
+        msg_id: String,
     },
 
     Error {
@@ -193,7 +194,12 @@ impl Frame {
                 Ok(())
             }
             Self::PreKeyBundle(bundle) => bundle.validate(),
-            Self::Send(envelope) | Self::Deliver { envelope, .. } => envelope.validate(),
+            Self::Send(envelope) => envelope.validate(),
+            Self::Deliver { msg_id, envelope } => {
+                validate_msg_id(msg_id)?;
+                envelope.validate()
+            }
+            Self::SendAck { msg_id } | Self::DeliverAck { msg_id } => validate_msg_id(msg_id),
             Self::Error { detail, .. } => {
                 if detail.len() > MAX_ERROR_DETAIL_LEN {
                     return Err(ProtoError::InvalidFrame("error detail too long"));
@@ -237,8 +243,15 @@ impl PreKeyBundle {
     }
 }
 
+fn validate_msg_id(msg_id: &str) -> Result<(), ProtoError> {
+    if msg_id.is_empty() || msg_id.len() > MAX_MSG_ID_LEN {
+        return Err(ProtoError::InvalidFrame("bad stream entry id"));
+    }
+    Ok(())
+}
+
 impl Envelope {
-    fn validate(&self) -> Result<(), ProtoError> {
+    pub(crate) fn validate(&self) -> Result<(), ProtoError> {
         if self.v != PROTOCOL_VERSION {
             return Err(ProtoError::InvalidFrame("unsupported envelope version"));
         }

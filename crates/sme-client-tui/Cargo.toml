@@ -11,6 +11,7 @@ sme-client-net = { path = "../sme-client-net" }
 sme-client-store = { path = "../sme-client-store" }
 sme-proto = { path = "../sme-proto" }
 sme-server = { path = "../sme-server" }
+sme-test-support = { path = "../sme-test-support" }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 vodozemac = { workspace = true }

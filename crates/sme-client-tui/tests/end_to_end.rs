@@ -5,49 +5,33 @@
 //!
 //! 需要真实 Postgres（`DATABASE_URL`）；未设置时跳过。
 
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use sme_client_core::{Action, Client};
 use sme_client_net::Transport;
 use sme_client_store::Keystore;
 use sme_proto::{AccountId, Envelope, Frame, KdfParams};
+use sme_server::valkey::{Valkey, random_instance_id};
 use sme_server::{app, state::AppState};
+use sme_test_support::{TestDir, ValkeyContainer};
 use sqlx::postgres::PgPoolOptions;
 use vodozemac::olm::Account;
 
 const PASSWORD: &[u8] = b"correct horse battery staple";
 const KDF_SALT: [u8; 16] = [3u8; 16];
+const HMAC_KEY: &[u8] = b"test-hmac-key-0123456789abcdef";
 
 static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
-struct TestDir(PathBuf);
-
-impl TestDir {
-    fn new(name: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("sme-{name}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-
-    fn join(&self, name: &str) -> PathBuf {
-        self.0.join(name)
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// 起一个绑定随机端口的网关；未配置数据库时返回 `None`。
-async fn start_server() -> Option<String> {
+/// 起一个绑定随机端口的网关；返回 URL 与必须保活的 Valkey 容器句柄。
+async fn start_server() -> Option<(String, ValkeyContainer)> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
+    let container = match ValkeyContainer::ephemeral().await {
+        Ok(container) => container,
+        Err(error) => {
+            eprintln!("跳过端到端测试：无法启动 Valkey 容器（{error}）");
+            return None;
+        }
+    };
+
     let pool = PgPoolOptions::new()
         .max_connections(8)
         .connect(&database_url)
@@ -63,15 +47,23 @@ async fn start_server() -> Option<String> {
         })
         .await;
 
+    let valkey = Valkey::connect(
+        container.url(),
+        HMAC_KEY,
+        random_instance_id().expect("instance id"),
+    )
+    .await
+    .expect("connect valkey");
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app(AppState::new(pool)))
+        axum::serve(listener, app(AppState::new(pool, valkey)))
             .await
             .unwrap();
     });
 
-    Some(format!("ws://{addr}/ws"))
+    Some((format!("ws://{addr}/ws"), container))
 }
 
 /// `Action::Persist` 的落点：账号 + 全部会话。
@@ -184,7 +176,7 @@ fn outgoing_envelope(actions: &[Action], plaintext: &[u8]) -> Envelope {
 
 #[tokio::test]
 async fn two_clients_chat_and_resume_after_restart() {
-    let Some(url) = start_server().await else {
+    let Some((url, _valkey)) = start_server().await else {
         eprintln!("跳过端到端测试：未设置 DATABASE_URL");
         return;
     };

@@ -60,7 +60,7 @@ fn handshake_and_bidirectional_messages() {
     assert_eq!(envelope.to, bob_id);
 
     let actions = bob.handle_frame(Frame::Deliver {
-        msg_id: 1,
+        msg_id: "1".to_string(),
         envelope,
     });
     assert!(actions.iter().any(
@@ -75,7 +75,7 @@ fn handshake_and_bidirectional_messages() {
     assert_eq!(envelope.kind, OlmMessageKind::Normal);
 
     let actions = alice.handle_frame(Frame::Deliver {
-        msg_id: 2,
+        msg_id: "2".to_string(),
         envelope,
     });
     assert!(actions.iter().any(
@@ -94,7 +94,7 @@ fn duplicate_delivery_is_acked_but_not_shown() {
     };
 
     let first = bob.handle_frame(Frame::Deliver {
-        msg_id: 7,
+        msg_id: "7".to_string(),
         envelope: envelope.clone(),
     });
     assert!(
@@ -104,7 +104,7 @@ fn duplicate_delivery_is_acked_but_not_shown() {
     );
 
     let second = bob.handle_frame(Frame::Deliver {
-        msg_id: 7,
+        msg_id: "7".to_string(),
         envelope,
     });
     assert!(
@@ -112,11 +112,9 @@ fn duplicate_delivery_is_acked_but_not_shown() {
             .iter()
             .any(|action| matches!(action, Action::DecryptFailed { .. }))
     );
-    assert!(
-        second
-            .iter()
-            .any(|action| matches!(action, Action::Send(Frame::DeliverAck { msg_id: 7 })))
-    );
+    assert!(second.iter().any(
+        |action| matches!(action, Action::Send(Frame::DeliverAck { msg_id }) if msg_id == "7")
+    ));
     assert_eq!(bob.buffer().len(), 1, "重复投递不得重复显示");
 }
 
@@ -132,7 +130,7 @@ fn buffer_drops_the_oldest_messages() {
             panic!("expected Send");
         };
         bob.handle_frame(Frame::Deliver {
-            msg_id: i as u64,
+            msg_id: i.to_string(),
             envelope,
         });
     }
@@ -163,7 +161,7 @@ fn envelope_addressed_to_someone_else_is_ignored() {
     };
     envelope.to = AccountId::random();
     let actions = bob.handle_frame(Frame::Deliver {
-        msg_id: 9,
+        msg_id: "9".to_string(),
         envelope,
     });
     assert!(

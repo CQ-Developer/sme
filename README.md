@@ -17,7 +17,7 @@ cargo test --workspace          # 含 I3（内存缓冲 ≤10 条）与 I11（ke
 python3 scripts/ci/run_gates.py # I1 字段名 / I2 核心禁词 / Valkey 禁持久化，含注入自检
 ```
 
-服务端与端到端集成测试需要真实 Postgres：
+服务端与端到端集成测试需要真实 Postgres 与 Docker（测试会自动起临时 Valkey 容器）：
 
 ```bash
 docker run --rm -d --name sme-pg-test \

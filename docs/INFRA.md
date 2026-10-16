@@ -68,7 +68,7 @@ CREATE TABLE accounts (
 | `img:{h}:{msgid}` | String | 图片密文（≤1MB） | 24h |
 | `p:{h}` | String | presence：网关实例 ID（心跳 20s 续期） | 60s |
 | `pk:{h}` | Hash | 对端可取的一次性 prekey bundle | 7d |
-| `ch:{nonce}` | String | 登录挑战（绑定 account_id） | 60s |
+| `ch:{nonce}` | String | 登录挑战：值 = `h(account)`（网关按 HMAC 值比对，不存明文账号） | 60s |
 | `rl:*:{h}:{w}` | String | 限流计数器 | 按窗口 |
 
 服务端密钥（用于 HMAC）由网关启动时从环境变量读取；轮换时只影响键名映射，历史上限内的队列会因此不可读——**轮换前先排空队列**。
@@ -80,11 +80,13 @@ CREATE TABLE accounts (
 写入路径（发送方 → 收件人离线/在线均走同一条队列，无在线旁路）：
 
 ```
-XADD q:{h} MAXLEN ~ 100 * meta...      # 文本密文在 meta 里；图片另有 img:{h}:{id}
+XADD q:{h} MAXLEN ~ 100 * e <信封字节>   # 文本密文在 Stream 条目里；图片另有 img:{h}:{id}
+XTRIM q:{h} MINID <now-24h>            # 与 XADD 一起做，用 Lua 保证原子
 （若含图片）SET img:{h}:{id} <payload> EX 86400
-XTRIM q:{h} MINID <now-24h>            # 与条目一起做，用 Lua 保证原子
-PUBLISH gw:{h(网关实例)} <唤醒提示>      # 只通知持有该连接的网关实例
+PUBLISH gw:{h} <条目 ID>                 # 只在收件人不在本网关时发布；Pub/Sub 丢了也不影响正确性
 ```
+
+> M3 落地细节：网关先读本地连接表——收件人在本实例直接投递；否则 `PUBLISH gw:{h}`，由持有该连接的网关订阅后投递。登录时也会主动 `XRANGE` 排空一次队列（离线消息兔底）。
 
 读取与删除：网关 `XRANGE q:{h}` 读到本地连接上 → 写 socket → 收到客户端 **D-ack** 后用一个 Lua 脚本原子执行 `XDEL q:{h} <id>` + `DEL img:{h}:{id}`。
 
@@ -94,12 +96,14 @@ PUBLISH gw:{h(网关实例)} <唤醒提示>      # 只通知持有该连接的�
 
 | 项 | 值 | 说明 |
 | --- | --- | --- |
-| 单条文本 | ≤ 16 KB | 网关拒绝更大者 |
+| 单条文本 | 客户端 ≤ 16 KB | 服务端只能看到密文，实际由客户端强制；网关侧上限是信封 ≤ 1.1 MB（`MAX_ENVELOPE_PAYLOAD`） |
 | 单张图片 | 压缩后 ≤ 1 MB | 客户端压缩（见 §7.3） |
 | 每收件人条数 | ≤ 100 | `MAXLEN ~ 100` |
 | 每收件人图片 | ≤ 10 张且 ≤ 12 MB | 推送前按 Stream 元数据求和校验，超出则拒绝 |
 | 全局 | `maxmemory 1gb` + `noeviction` | 满了明确拒绝新消息，**不静默驱逐别人的消息** |
-| 网关并发大消息 | ≤ 8 路在途 | 防止少量 1MB 消息吃光网关内存 |
+| 网关并发大消息 | ≤ 8 路在途（>64KB） | 信号量，防止少量 1MB 消息吃光网关内存 |
+| 消息限流 | 120 条/分钟/账号 | 固定窗口计数 `rl:msg:{h}:{w}` |
+| 挑战限流 | 30 次/分钟/账号 | `rl:ch:{h}:{w}` |
 
 被拒绝时发送方收到的错误是「服务器暂存已满，请稍后重试」——它只反映服务器负载，**不反映对方状态**（见 §4.5）。
 
@@ -186,7 +190,7 @@ volumes:
 
 配套三件事：
 
-1. **启动自检（I7）**：网关启动时执行 `CONFIG GET save appendonly`，只要 `save` 非空或 `appendonly` 为 `yes` 就**拒绝启动**并打印修复提示。运维误配是这套架构最现实的失败模式。
+1. **启动自检（I7）**：网关启动时执行 `CONFIG GET save appendonly maxmemory-policy`，只要 `save` 非空、`appendonly` 为 `yes`、或驱逐策略不是 `noeviction` 就**拒绝启动**并打印修复提示。运维误配是这套架构最现实的失败模式。
 2. **配置 lint（CI）**：解析 compose 文件，断言 `valkey` 服务满足「无持久卷 + tmpfs + `--save ""` + `--appendonly no` + `noeviction`」，任一不满足即 CI 失败。
 3. **健康检查**：`/healthz`（进程存活，供 compose/负载均衡用）与 `/stats`（只返回聚合计数：连接数、队列深度、拒收次数）——**不含任何内容**。不接观测栈，但这两个端点必须有，否则排障只能靠猜。
 

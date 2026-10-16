@@ -32,13 +32,13 @@ pub enum Action {
     Send(Frame),
     /// 新解密出的明文（已进入内存缓冲）。
     Received {
-        msg_id: u64,
+        msg_id: String,
         from: AccountId,
         plaintext: Vec<u8>,
     },
     /// 解密失败（如重复投递）；已回 D-ack，不显示。
     DecryptFailed {
-        msg_id: u64,
+        msg_id: String,
         from: AccountId,
     },
     /// 收不到/看不懂的帧；只记录，不影响连接。
@@ -56,7 +56,7 @@ pub enum Action {
     },
     /// 一条消息已被服务端接管（Q-ack）。
     Sent {
-        msg_id: u64,
+        msg_id: String,
     },
     Ready,
     /// 账号或会话状态有变化；调用方应写 keystore。
@@ -226,6 +226,7 @@ impl Client {
                 let signature = self.account.sign(login_payload(&self.account_id, &nonce));
                 vec![Action::Send(Frame::Login {
                     account_id: self.account_id,
+                    nonce,
                     signature: Signature::from_bytes(signature.to_bytes()),
                 })]
             }
@@ -261,7 +262,7 @@ impl Client {
         }
     }
 
-    fn handle_deliver(&mut self, msg_id: u64, envelope: Envelope) -> Vec<Action> {
+    fn handle_deliver(&mut self, msg_id: String, envelope: Envelope) -> Vec<Action> {
         let from = envelope.from;
         match self.decrypt(&envelope) {
             Ok((plaintext, session_changed)) => {
@@ -272,7 +273,7 @@ impl Client {
 
                 let mut actions = vec![
                     Action::Received {
-                        msg_id,
+                        msg_id: msg_id.clone(),
                         from,
                         plaintext,
                     },
@@ -284,7 +285,10 @@ impl Client {
                 actions
             }
             Err(_) => vec![
-                Action::DecryptFailed { msg_id, from },
+                Action::DecryptFailed {
+                    msg_id: msg_id.clone(),
+                    from,
+                },
                 // 重复投递会消耗掉的消息密钥：也必须 D-ack，否则服务端会一直重投
                 Action::Send(Frame::DeliverAck { msg_id }),
             ],

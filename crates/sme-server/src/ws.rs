@@ -1,5 +1,6 @@
-//! WebSocket 状态机：注册 → 挑战-签名登录 → 预密钥 / 密文转发。
+//! WebSocket 状态机：注册 → 挑战-签名登录 → 预密钥 / 密文转发（M3）。
 //!
+//! 网关无状态：队列、预密钥、挑战与 presence 全在 Valkey；本进程只保存活连接。
 //! 帧的 `payload` 不解析、不落日志；所有错误都以 `Frame::Error` 回给对端。
 
 use std::time::Duration;
@@ -9,22 +10,26 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use sme_proto::{
-    AccountId, Envelope, ErrorCode, Frame, PreKeyBundle, decode, encode, login_payload,
+    AccountId, ErrorCode, Frame, PreKeyBundle, decode, encode, encode_envelope, login_payload,
 };
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use vodozemac::{Ed25519PublicKey, Ed25519Signature};
 
 use crate::db;
 use crate::state::{
-    AppState, Challenge, Connection, MAX_PENDING_CHALLENGES, MAX_QUEUED_PER_RECIPIENT,
-    MAX_STORED_PREKEYS, QueuedMessage,
+    AppState, BIG_MESSAGE_BYTES, CHALLENGE_RATE_LIMIT_PER_MINUTE, Connection,
+    MESSAGE_RATE_LIMIT_PER_MINUTE,
 };
 
 /// 写方向缓冲深度：够了就行，避免慢客户端吃内存。
 const WRITE_QUEUE: usize = 128;
 
-/// 登录挑战有效期。
-const CHALLENGE_TTL: Duration = Duration::from_secs(60);
+/// presence 心跳间隔（docs/INFRA.md §4.1：20s 续期，TTL 60s）。
+const PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
+
+/// 每账号每分钟的消息限流窗口。
+const RATE_WINDOW_SECS: u64 = 60;
 
 pub async fn ws_handler(State(state): State<AppState>, upgrade: WebSocketUpgrade) -> Response {
     upgrade.on_upgrade(move |socket| async move {
@@ -35,6 +40,7 @@ pub async fn ws_handler(State(state): State<AppState>, upgrade: WebSocketUpgrade
 async fn handle_socket(state: AppState, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Frame>(WRITE_QUEUE);
+    let (kick_tx, mut kick_rx) = mpsc::channel::<()>(1);
 
     let writer = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
@@ -51,41 +57,70 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
 
     let conn_id = state.next_connection_id();
     let mut account: Option<AccountId> = None;
+    let mut pubsub_task: Option<JoinHandle<()>> = None;
+    let mut presence_task: Option<JoinHandle<()>> = None;
 
-    while let Some(message) = stream.next().await {
-        let message = match message {
-            Ok(message) => message,
-            Err(_) => break,
-        };
-        match message {
-            Message::Binary(bytes) => match decode(&bytes) {
-                Ok(frame) => handle_frame(&state, &mut account, conn_id, &tx, frame).await,
-                Err(_) => {
-                    send_error(&tx, ErrorCode::BadFrame, "undecodable frame").await;
+    loop {
+        tokio::select! {
+            message = stream.next() => {
+                let Some(message) = message else { break };
+                let Ok(message) = message else { break };
+                if let Message::Binary(bytes) = message {
+                    match decode(&bytes) {
+                        Ok(frame) => {
+                            handle_frame(
+                                &state,
+                                &mut account,
+                                conn_id,
+                                &tx,
+                                &kick_tx,
+                                &mut pubsub_task,
+                                &mut presence_task,
+                                frame,
+                            ).await;
+                        }
+                        Err(_) => send_error(&tx, ErrorCode::BadFrame, "undecodable frame").await,
+                    }
                 }
-            },
-            Message::Close(_) => break,
-            _ => {}
+
+                // 已被本实例的新登录顶替：停止处理旧连接的帧。
+                if let Some(current) = account
+                    && !state.is_current_connection(current, conn_id)
+                {
+                    break;
+                }
+            }
+            _ = kick_rx.recv() => {
+                send_error(&tx, ErrorCode::SessionReplaced, "signed in elsewhere").await;
+                break;
+            }
         }
     }
 
+    if let Some(task) = pubsub_task {
+        task.abort();
+    }
+    if let Some(task) = presence_task {
+        task.abort();
+    }
     if let Some(account) = account {
-        let mut connections = state.connections();
-        if connections
-            .get(&account)
-            .is_some_and(|connection| connection.conn_id == conn_id)
-        {
-            connections.remove(&account);
+        state.remove_connection(account, conn_id);
+        if let Err(error) = state.valkey.clear_presence(account).await {
+            eprintln!("clear presence failed: {error}");
         }
     }
     writer.abort();
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_frame(
     state: &AppState,
     account: &mut Option<AccountId>,
     conn_id: u64,
     tx: &mpsc::Sender<Frame>,
+    kick_tx: &mpsc::Sender<()>,
+    pubsub_task: &mut Option<JoinHandle<()>>,
+    presence_task: &mut Option<JoinHandle<()>>,
     frame: Frame,
 ) {
     match frame {
@@ -96,7 +131,7 @@ async fn handle_frame(
             }
             match db::insert_account(&state.db, &registration).await {
                 Ok(true) => {
-                    state.known().insert(registration.account_id);
+                    state.mark_known(registration.account_id);
                     send_frame(
                         tx,
                         Frame::RegisterAck {
@@ -121,6 +156,29 @@ async fn handle_frame(
         }
 
         Frame::ChallengeRequest { account_id } => {
+            match state
+                .valkey
+                .check_rate_limit(
+                    "ch",
+                    account_id,
+                    CHALLENGE_RATE_LIMIT_PER_MINUTE,
+                    RATE_WINDOW_SECS,
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    state.count_rejected();
+                    send_error(tx, ErrorCode::RateLimited, "too many challenges").await;
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("challenge rate limit failed: {error}");
+                    send_error(tx, ErrorCode::Internal, "valkey error").await;
+                    return;
+                }
+            }
+
             match db::load_account(&state.db, account_id).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
@@ -139,30 +197,10 @@ async fn handle_frame(
                 send_error(tx, ErrorCode::Internal, "random source unavailable").await;
                 return;
             }
-
-            let rate_limited = {
-                let mut challenges = state.challenges();
-                if challenges.len() >= MAX_PENDING_CHALLENGES {
-                    let now = std::time::Instant::now();
-                    challenges.retain(|_, challenge| {
-                        now.duration_since(challenge.issued_at) <= CHALLENGE_TTL
-                    });
-                }
-                if challenges.len() >= MAX_PENDING_CHALLENGES {
-                    true
-                } else {
-                    challenges.insert(
-                        account_id,
-                        Challenge {
-                            nonce,
-                            issued_at: std::time::Instant::now(),
-                        },
-                    );
-                    false
-                }
-            };
-            if rate_limited {
-                send_error(tx, ErrorCode::RateLimited, "too many pending challenges").await;
+            let account_hash = state.valkey.hmac_account(account_id);
+            if let Err(error) = state.valkey.set_challenge(&nonce, &account_hash).await {
+                eprintln!("challenge store failed: {error}");
+                send_error(tx, ErrorCode::Internal, "valkey error").await;
                 return;
             }
             send_frame(tx, Frame::Challenge { nonce }).await;
@@ -170,15 +208,23 @@ async fn handle_frame(
 
         Frame::Login {
             account_id,
+            nonce,
             signature,
         } => {
-            let challenge = state.challenges().remove(&account_id);
-            let Some(challenge) = challenge else {
+            let expected = match state.valkey.take_challenge(&nonce).await {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("challenge take failed: {error}");
+                    send_error(tx, ErrorCode::Internal, "valkey error").await;
+                    return;
+                }
+            };
+            let Some(expected_hash) = expected else {
                 send_error(tx, ErrorCode::ChallengeExpired, "no pending challenge").await;
                 return;
             };
-            if challenge.issued_at.elapsed() > CHALLENGE_TTL {
-                send_error(tx, ErrorCode::ChallengeExpired, "challenge expired").await;
+            if expected_hash != state.valkey.hmac_account(account_id) {
+                send_error(tx, ErrorCode::BadSignature, "challenge mismatch").await;
                 return;
             }
 
@@ -204,7 +250,7 @@ async fn handle_frame(
                 return;
             };
             if public_key
-                .verify(&login_payload(&account_id, &challenge.nonce), &signature)
+                .verify(&login_payload(&account_id, &nonce), &signature)
                 .is_err()
             {
                 send_error(tx, ErrorCode::BadSignature, "signature mismatch").await;
@@ -212,25 +258,75 @@ async fn handle_frame(
             }
 
             *account = Some(account_id);
-            state.known().insert(account_id);
+            state.mark_known(account_id);
 
+            // D10：同一账号单会话。本实例的直接踢，跨实例的靠 presence + 频道通知。
             let previous = state.connections().insert(
                 account_id,
                 Connection {
                     conn_id,
                     tx: tx.clone(),
+                    kick: kick_tx.clone(),
                 },
             );
             if let Some(previous) = previous {
-                // D10：单会话，新登录踢掉旧会话并明确告知。
-                let _ = previous.tx.try_send(error_frame(
-                    ErrorCode::SessionReplaced,
-                    "signed in from another connection",
-                ));
+                let _ = previous.kick.try_send(());
+            }
+
+            match state.valkey.take_presence(account_id).await {
+                Ok(Some(previous_instance)) if previous_instance != state.valkey.instance_id() => {
+                    if let Err(error) = state.valkey.publish(account_id, "k").await {
+                        eprintln!("kick publish failed: {error}");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("presence update failed: {error}"),
+            }
+
+            // 订阅唤醒频道；Pub/Sub 丢失不影响正确性，登录时的 flush 会兜底。
+            match state.valkey.subscribe(account_id).await {
+                Ok(mut pubsub) => {
+                    let state = state.clone();
+                    *pubsub_task = Some(tokio::spawn(async move {
+                        let mut messages = pubsub.on_message();
+                        while let Some(message) = messages.next().await {
+                            let payload = message.get_payload::<String>().unwrap_or_default();
+                            if payload == "k" {
+                                if let Some(connection) =
+                                    state.connections().get(&account_id).cloned()
+                                {
+                                    let _ = connection.kick.try_send(());
+                                }
+                            } else {
+                                flush_account(&state, account_id).await;
+                            }
+                        }
+                    }));
+                }
+                Err(error) => eprintln!("pubsub subscribe failed: {error}"),
+            }
+
+            // presence 心跳；被顶替后 refresh 返回 false，任务自行退出。
+            {
+                let state = state.clone();
+                *presence_task = Some(tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(PRESENCE_REFRESH_INTERVAL);
+                    loop {
+                        ticker.tick().await;
+                        match state.valkey.refresh_presence(account_id).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                eprintln!("presence refresh failed: {error}");
+                                break;
+                            }
+                        }
+                    }
+                }));
             }
 
             send_frame(tx, Frame::LoginAck { account_id }).await;
-            flush_queue(state, account_id).await;
+            flush_account(state, account_id).await;
         }
 
         Frame::UploadPreKeys { prekeys } => {
@@ -238,30 +334,21 @@ async fn handle_frame(
                 send_error(tx, ErrorCode::NotAuthenticated, "login required").await;
                 return;
             };
-
-            let stored = {
-                let mut all_prekeys = state.prekeys();
-                let queue = all_prekeys.entry(account_id).or_default();
-                for prekey in prekeys {
-                    if !queue
-                        .iter()
-                        .any(|existing| existing.key_id == prekey.key_id)
-                    {
-                        queue.push_back(prekey);
-                    }
+            match state.valkey.store_prekeys(account_id, &prekeys).await {
+                Ok(stored) => {
+                    send_frame(
+                        tx,
+                        Frame::UploadPreKeysAck {
+                            stored: stored as u16,
+                        },
+                    )
+                    .await;
                 }
-                while queue.len() > MAX_STORED_PREKEYS {
-                    queue.pop_front();
+                Err(error) => {
+                    eprintln!("prekey store failed: {error}");
+                    send_error(tx, ErrorCode::Internal, "valkey error").await;
                 }
-                queue.len()
-            };
-            send_frame(
-                tx,
-                Frame::UploadPreKeysAck {
-                    stored: stored as u16,
-                },
-            )
-            .await;
+            }
         }
 
         Frame::FetchPreKey { account_id } => {
@@ -283,31 +370,33 @@ async fn handle_frame(
                 }
             };
 
-            let prekey = state
-                .prekeys()
-                .get_mut(&account_id)
-                .and_then(|queue| queue.pop_front());
-            let Some(prekey) = prekey else {
-                send_error(
-                    tx,
-                    ErrorCode::PreKeyUnavailable,
-                    "no one-time key available",
-                )
-                .await;
-                return;
-            };
-
-            send_frame(
-                tx,
-                Frame::PreKeyBundle(PreKeyBundle {
-                    account_id,
-                    ed25519_pub: stored.ed25519_pub,
-                    curve25519_pub: stored.curve25519_pub,
-                    one_time_key_id: prekey.key_id,
-                    one_time_key: prekey.public_key,
-                }),
-            )
-            .await;
+            match state.valkey.take_prekey(account_id).await {
+                Ok(Some(prekey)) => {
+                    send_frame(
+                        tx,
+                        Frame::PreKeyBundle(PreKeyBundle {
+                            account_id,
+                            ed25519_pub: stored.ed25519_pub,
+                            curve25519_pub: stored.curve25519_pub,
+                            one_time_key_id: prekey.key_id,
+                            one_time_key: prekey.public_key,
+                        }),
+                    )
+                    .await;
+                }
+                Ok(None) => {
+                    send_error(
+                        tx,
+                        ErrorCode::PreKeyUnavailable,
+                        "no one-time key available",
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    eprintln!("prekey take failed: {error}");
+                    send_error(tx, ErrorCode::Internal, "valkey error").await;
+                }
+            }
         }
 
         Frame::Send(envelope) => {
@@ -315,6 +404,10 @@ async fn handle_frame(
                 send_error(tx, ErrorCode::NotAuthenticated, "login required").await;
                 return;
             };
+            if !state.is_current_connection(sender, conn_id) {
+                send_error(tx, ErrorCode::SessionReplaced, "signed in elsewhere").await;
+                return;
+            }
             if envelope.from != sender {
                 send_error(
                     tx,
@@ -330,32 +423,64 @@ async fn handle_frame(
                 return;
             }
 
-            let msg_id = state.next_message_id();
-            let message = QueuedMessage {
-                msg_id,
-                envelope: Envelope {
-                    from: sender,
-                    ..envelope
-                },
-            };
-
-            let queue_full = {
-                let mut queues = state.queues();
-                let queue = queues.entry(recipient).or_default();
-                if queue.len() >= MAX_QUEUED_PER_RECIPIENT {
-                    true
-                } else {
-                    queue.push_back(message);
-                    false
+            match state
+                .valkey
+                .check_rate_limit(
+                    "msg",
+                    sender,
+                    MESSAGE_RATE_LIMIT_PER_MINUTE,
+                    RATE_WINDOW_SECS,
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    state.count_rejected();
+                    send_error(tx, ErrorCode::RateLimited, "sending too fast").await;
+                    return;
                 }
-            };
-            if queue_full {
-                send_error(tx, ErrorCode::QueueFull, "recipient queue is full").await;
-                return;
+                Err(error) => {
+                    eprintln!("message rate limit failed: {error}");
+                    send_error(tx, ErrorCode::Internal, "valkey error").await;
+                    return;
+                }
             }
 
-            send_frame(tx, Frame::SendAck { msg_id }).await;
-            deliver_queued(state, recipient, Some(msg_id)).await;
+            let Ok(bytes) = encode_envelope(&envelope) else {
+                send_error(tx, ErrorCode::BadFrame, "invalid envelope").await;
+                return;
+            };
+
+            // 大消息在途上限：防止少量 1MB 消息吃光网关内存。
+            let _permit = if bytes.len() > BIG_MESSAGE_BYTES {
+                match state.big_messages().acquire().await {
+                    Ok(permit) => Some(permit),
+                    Err(_) => {
+                        send_error(tx, ErrorCode::Internal, "big message limiter closed").await;
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+
+            let entry_id = match state.valkey.enqueue(recipient, &bytes).await {
+                Ok(entry_id) => entry_id,
+                Err(error) => {
+                    eprintln!("enqueue failed: {error}");
+                    send_error(tx, ErrorCode::Internal, "valkey error").await;
+                    return;
+                }
+            };
+            state.count_forwarded();
+
+            if state.connections().contains_key(&recipient) {
+                flush_account(state, recipient).await;
+            } else if let Err(error) = state.valkey.publish(recipient, &entry_id).await {
+                eprintln!("publish failed: {error}");
+            }
+
+            send_frame(tx, Frame::SendAck { msg_id: entry_id }).await;
         }
 
         Frame::DeliverAck { msg_id } => {
@@ -363,16 +488,8 @@ async fn handle_frame(
                 send_error(tx, ErrorCode::NotAuthenticated, "login required").await;
                 return;
             };
-            let mut queues = state.queues();
-            let empty = match queues.get_mut(&recipient) {
-                Some(queue) => {
-                    queue.retain(|message| message.msg_id != msg_id);
-                    queue.is_empty()
-                }
-                None => false,
-            };
-            if empty {
-                queues.remove(&recipient);
+            if let Err(error) = state.valkey.ack(recipient, &msg_id).await {
+                eprintln!("ack failed: {error}");
             }
         }
 
@@ -390,34 +507,29 @@ async fn handle_frame(
     }
 }
 
-/// 按序投递该收件人队列里的消息；不删除，等 D-ack。
-async fn flush_queue(state: &AppState, account: AccountId) {
-    deliver_queued(state, account, None).await;
-}
-
-/// `only_msg_id = None` 时投递队列里全部未 ACK 的消息。
-async fn deliver_queued(state: &AppState, account: AccountId, only_msg_id: Option<u64>) {
+/// 把该账号队列里全部未 D-ack 的密文按顺序推给本实例持有的连接。
+async fn flush_account(state: &AppState, account: AccountId) {
     let Some(connection) = state.connections().get(&account).cloned() else {
         return;
     };
-    let pending: Vec<QueuedMessage> = state
-        .queues()
-        .get(&account)
-        .map(|queue| {
-            queue
-                .iter()
-                .filter(|message| only_msg_id.is_none_or(|msg_id| message.msg_id == msg_id))
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
 
-    for message in pending {
+    let entries = match state.valkey.queued(account).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("queue read failed: {error}");
+            return;
+        }
+    };
+
+    for (entry_id, bytes) in entries {
+        let Ok(envelope) = sme_proto::decode_envelope(&bytes) else {
+            continue;
+        };
         if connection
             .tx
             .send(Frame::Deliver {
-                msg_id: message.msg_id,
-                envelope: message.envelope,
+                msg_id: entry_id,
+                envelope,
             })
             .await
             .is_err()
@@ -432,12 +544,10 @@ async fn send_frame(tx: &mpsc::Sender<Frame>, frame: Frame) {
 }
 
 async fn send_error(tx: &mpsc::Sender<Frame>, code: ErrorCode, detail: &str) {
-    let _ = tx.send(error_frame(code, detail)).await;
-}
-
-fn error_frame(code: ErrorCode, detail: &str) -> Frame {
-    Frame::Error {
-        code,
-        detail: detail.to_string(),
-    }
+    let _ = tx
+        .send(Frame::Error {
+            code,
+            detail: detail.to_string(),
+        })
+        .await;
 }

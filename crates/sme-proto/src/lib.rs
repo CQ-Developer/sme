@@ -9,7 +9,7 @@ mod codec;
 mod frame;
 
 pub use account_id::AccountId;
-pub use codec::{decode, encode};
+pub use codec::{decode, decode_envelope, encode, encode_envelope};
 pub use frame::{
     Envelope, ErrorCode, Frame, KdfParams, OlmMessageKind, PreKeyBundle, PreKeyUpload,
     Registration, Signature,
@@ -35,6 +35,9 @@ pub const MAX_KEY_ID_LEN: usize = 64;
 
 /// `Frame::Error::detail` 长度上限。
 pub const MAX_ERROR_DETAIL_LEN: usize = 512;
+
+/// Valkey Stream 条目 ID 的字符串长度上限（形如 `1700000000000-0`）。
+pub const MAX_MSG_ID_LEN: usize = 64;
 
 /// 登录签名的规范化载荷：域名分隔 + 账号 ID + 挑战 nonce。
 ///

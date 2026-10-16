@@ -1,35 +1,41 @@
-//! M2 服务端集成测试：注册 → 登录 → 预密钥 → 密文转发 → D-ack。
+//! M2/M3 服务端集成测试：注册 → 登录 → 预密钥 → 密文转发 → D-ack。
 //!
-//! 需要真实 Postgres（`DATABASE_URL`）；未设置时打印提示并跳过（CI 里会设置）。
+//! 需要真实 Postgres（`DATABASE_URL`）与 Docker（临时 Valkey 容器）；
+//! 缺少任一条件时打印提示并跳过。
 
-use futures_util::{SinkExt, StreamExt};
 use sme_proto::{
-    AccountId, Envelope, ErrorCode, Frame, KdfParams, OlmMessageKind, PROTOCOL_VERSION,
-    PreKeyUpload, Registration, Signature, decode, encode, login_payload,
+    AccountId, Envelope, ErrorCode, Frame, OlmMessageKind, PROTOCOL_VERSION, PreKeyUpload,
+    Signature, login_payload,
 };
+use sme_server::valkey::{Valkey, random_instance_id};
 use sme_server::{app, state::AppState};
+use sme_test_support::{ValkeyContainer, connect, login, recv_frame, register, send_frame};
 use sqlx::postgres::PgPoolOptions;
-use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use vodozemac::Curve25519PublicKey;
 use vodozemac::olm::{
     Account, Message as OlmNormalMessage, OlmMessage, PreKeyMessage, SessionConfig,
 };
 
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+const HMAC_KEY: &[u8] = b"test-hmac-key-0123456789abcdef";
 
 static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
-/// 起一个绑定随机端口的网关；未配置数据库时返回 `None`。
-async fn test_server() -> Option<String> {
+/// 起一个绑定随机端口的网关；返回 URL 与必须保活的 Valkey 容器句柄。
+async fn test_server() -> Option<(String, ValkeyContainer)> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
+    let container = match ValkeyContainer::ephemeral().await {
+        Ok(container) => container,
+        Err(error) => {
+            eprintln!("跳过服务端集成测试：无法启动 Valkey 容器（{error}）");
+            return None;
+        }
+    };
+
     let pool = PgPoolOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
         .expect("connect test database");
-
     MIGRATED
         .get_or_init(|| async {
             sqlx::migrate!("../../migrations")
@@ -39,93 +45,28 @@ async fn test_server() -> Option<String> {
         })
         .await;
 
+    let valkey = Valkey::connect(
+        container.url(),
+        HMAC_KEY,
+        random_instance_id().expect("instance id"),
+    )
+    .await
+    .expect("connect valkey");
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app(AppState::new(pool)))
+        axum::serve(listener, app(AppState::new(pool, valkey)))
             .await
             .unwrap();
     });
 
-    Some(format!("ws://{addr}/ws"))
-}
-
-async fn connect(url: &str) -> Socket {
-    let (socket, _) = connect_async(url).await.expect("connect websocket");
-    socket
-}
-
-async fn send_frame(socket: &mut Socket, frame: Frame) {
-    socket
-        .send(Message::Binary(encode(&frame).unwrap().into()))
-        .await
-        .unwrap();
-}
-
-async fn recv_frame(socket: &mut Socket) -> Frame {
-    loop {
-        match socket
-            .next()
-            .await
-            .expect("socket open")
-            .expect("socket ok")
-        {
-            Message::Binary(bytes) => return decode(&bytes).unwrap(),
-            Message::Ping(_) | Message::Pong(_) => continue,
-            other => panic!("unexpected websocket message: {other:?}"),
-        }
-    }
-}
-
-async fn register(socket: &mut Socket, id: AccountId, account: &Account) {
-    let identity = account.identity_keys();
-    send_frame(
-        socket,
-        Frame::Register(Registration {
-            account_id: id,
-            ed25519_pub: *identity.ed25519.as_bytes(),
-            curve25519_pub: *identity.curve25519.as_bytes(),
-            kdf_salt: [1u8; 16],
-            kdf_params: KdfParams {
-                m_cost: 19_456,
-                t_cost: 2,
-                p_cost: 1,
-            },
-        }),
-    )
-    .await;
-
-    match recv_frame(socket).await {
-        Frame::RegisterAck { account_id } => assert_eq!(account_id, id),
-        other => panic!("expected RegisterAck, got {other:?}"),
-    }
-}
-
-async fn login(socket: &mut Socket, id: AccountId, account: &Account) {
-    send_frame(socket, Frame::ChallengeRequest { account_id: id }).await;
-    let Frame::Challenge { nonce } = recv_frame(socket).await else {
-        panic!("expected Challenge");
-    };
-
-    let signature = account.sign(login_payload(&id, &nonce));
-    send_frame(
-        socket,
-        Frame::Login {
-            account_id: id,
-            signature: Signature::from_bytes(signature.to_bytes()),
-        },
-    )
-    .await;
-
-    match recv_frame(socket).await {
-        Frame::LoginAck { account_id } => assert_eq!(account_id, id),
-        other => panic!("expected LoginAck, got {other:?}"),
-    }
+    Some((format!("ws://{addr}/ws"), container))
 }
 
 #[tokio::test]
 async fn relay_delivers_only_ciphertext() {
-    let Some(url) = test_server().await else {
+    let Some((url, _valkey)) = test_server().await else {
         eprintln!("跳过服务端集成测试：未设置 DATABASE_URL");
         return;
     };
@@ -151,7 +92,7 @@ async fn relay_delivers_only_ciphertext() {
         .expect("one-time key");
     send_frame(
         &mut bob_socket,
-        Frame::UploadPreKeys {
+        &Frame::UploadPreKeys {
             prekeys: vec![PreKeyUpload {
                 key_id: key_id.to_base64(),
                 public_key: *one_time_key.as_bytes(),
@@ -166,7 +107,11 @@ async fn relay_delivers_only_ciphertext() {
     bob.mark_keys_as_published();
 
     // Alice 取回 bundle 并建立 Olm 会话。
-    send_frame(&mut alice_socket, Frame::FetchPreKey { account_id: bob_id }).await;
+    send_frame(
+        &mut alice_socket,
+        &Frame::FetchPreKey { account_id: bob_id },
+    )
+    .await;
     let Frame::PreKeyBundle(bundle) = recv_frame(&mut alice_socket).await else {
         panic!("expected PreKeyBundle");
     };
@@ -194,7 +139,7 @@ async fn relay_delivers_only_ciphertext() {
         payload: message.to_bytes(),
     };
 
-    send_frame(&mut alice_socket, Frame::Send(envelope)).await;
+    send_frame(&mut alice_socket, &Frame::Send(envelope)).await;
     let Frame::SendAck { msg_id } = recv_frame(&mut alice_socket).await else {
         panic!("expected SendAck");
     };
@@ -230,7 +175,7 @@ async fn relay_delivers_only_ciphertext() {
     assert_eq!(inbound.plaintext, plaintext.to_vec());
     let mut bob_session = inbound.session;
 
-    send_frame(&mut bob_socket, Frame::DeliverAck { msg_id }).await;
+    send_frame(&mut bob_socket, &Frame::DeliverAck { msg_id }).await;
 
     // 反向：Bob 回一条 Normal 消息，Alice 必须能解开。
     let reply = match bob_session.encrypt("reply from bob").unwrap() {
@@ -246,7 +191,7 @@ async fn relay_delivers_only_ciphertext() {
         payload: reply.to_bytes(),
     };
 
-    send_frame(&mut bob_socket, Frame::Send(reply_envelope)).await;
+    send_frame(&mut bob_socket, &Frame::Send(reply_envelope)).await;
     let Frame::SendAck { msg_id: reply_id } = recv_frame(&mut bob_socket).await else {
         panic!("expected SendAck");
     };
@@ -266,7 +211,7 @@ async fn relay_delivers_only_ciphertext() {
 
 #[tokio::test]
 async fn login_rejects_a_bad_signature() {
-    let Some(url) = test_server().await else {
+    let Some((url, _valkey)) = test_server().await else {
         eprintln!("跳过服务端集成测试：未设置 DATABASE_URL");
         return;
     };
@@ -281,7 +226,7 @@ async fn login_rejects_a_bad_signature() {
     // Mallory 用自己的密钥签 Victim 的挑战。
     send_frame(
         &mut socket,
-        Frame::ChallengeRequest {
+        &Frame::ChallengeRequest {
             account_id: victim_id,
         },
     )
@@ -292,8 +237,9 @@ async fn login_rejects_a_bad_signature() {
     let forged = mallory.sign(login_payload(&victim_id, &nonce));
     send_frame(
         &mut socket,
-        Frame::Login {
+        &Frame::Login {
             account_id: victim_id,
+            nonce,
             signature: Signature::from_bytes(forged.to_bytes()),
         },
     )
@@ -310,7 +256,7 @@ async fn login_rejects_a_bad_signature() {
 
 #[tokio::test]
 async fn a_new_login_kicks_the_previous_connection() {
-    let Some(url) = test_server().await else {
+    let Some((url, _valkey)) = test_server().await else {
         eprintln!("跳过服务端集成测试：未设置 DATABASE_URL");
         return;
     };

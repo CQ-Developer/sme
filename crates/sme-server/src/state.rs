@@ -1,70 +1,66 @@
-//! 网关运行时状态：活连接、登录挑战、一次性预密钥与离线密文队列。
+//! 网关运行时状态：本实例的活连接、已见账号与聚合计数。
 //!
-//! M2 全部在进程内存中（单实例）；M3 迁移到 Valkey + 无状态网关，这些语义不变。
+//! 队列、预密钥、挑战、presence、限流都在 Valkey（见 [`crate::valkey`]），
+//! 网关本身不保存任何密文。
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
 
-use sme_proto::{AccountId, Envelope, Frame, PreKeyUpload};
+use sme_proto::{AccountId, Frame};
 use sqlx::PgPool;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc::Sender;
 
-/// 每个收件人最多暂存的密文条数（与 D7 一致）。
-pub const MAX_QUEUED_PER_RECIPIENT: usize = 100;
+use crate::valkey::Valkey;
 
-/// 未消费登录挑战的上限，防止无界增长。
-pub const MAX_PENDING_CHALLENGES: usize = 10_000;
+/// 同时处理的大消息（>64KB）上限，防止少量 1MB 消息吃光网关内存（docs/INFRA.md §4.3）。
+pub const MAX_CONCURRENT_BIG_MESSAGES: usize = 8;
 
-/// 每个账号在服务端保存的一次性预密钥上限。
-pub const MAX_STORED_PREKEYS: usize = 100;
+/// 超过该大小的信封走大消息信号量。
+pub const BIG_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// 每账号每分钟消息上限（docs/INFRA.md §4.3）。
+pub const MESSAGE_RATE_LIMIT_PER_MINUTE: u64 = 120;
+
+/// 每账号每分钟登录挑战上限。
+pub const CHALLENGE_RATE_LIMIT_PER_MINUTE: u64 = 30;
 
 /// 一条连接句柄。
 #[derive(Clone)]
 pub struct Connection {
-    /// 连接序号：登录被顶替（D10）时用来避免误删新连接。
+    /// 连接序号：被顶替（D10）时用来避免误删新连接。
     pub conn_id: u64,
+    /// 出站帧通道。
     pub tx: Sender<Frame>,
-}
-
-/// 一次性登录挑战。
-pub struct Challenge {
-    pub nonce: [u8; 32],
-    pub issued_at: Instant,
-}
-
-/// 队列里尚未 D-ack 的密文。
-#[derive(Clone)]
-pub struct QueuedMessage {
-    pub msg_id: u64,
-    pub envelope: Envelope,
+    /// 让读循环主动退出（顶替 / 远端踢出）。
+    pub kick: Sender<()>,
 }
 
 /// 共享状态；`AppState` 可以随意 clone。
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
+    pub valkey: Valkey,
     next_conn_id: Arc<AtomicU64>,
-    next_msg_id: Arc<AtomicU64>,
     connections: Arc<Mutex<HashMap<AccountId, Connection>>>,
-    challenges: Arc<Mutex<HashMap<AccountId, Challenge>>>,
-    prekeys: Arc<Mutex<HashMap<AccountId, VecDeque<PreKeyUpload>>>>,
-    queues: Arc<Mutex<HashMap<AccountId, VecDeque<QueuedMessage>>>>,
     known: Arc<Mutex<HashSet<AccountId>>>,
+    forwarded: Arc<AtomicU64>,
+    rejected: Arc<AtomicU64>,
+    big_messages: Arc<Semaphore>,
 }
 
 impl AppState {
-    pub fn new(db: PgPool) -> Self {
+    pub fn new(db: PgPool, valkey: Valkey) -> Self {
         Self {
             db,
+            valkey,
             next_conn_id: Arc::new(AtomicU64::new(1)),
-            next_msg_id: Arc::new(AtomicU64::new(1)),
             connections: Arc::new(Mutex::new(HashMap::new())),
-            challenges: Arc::new(Mutex::new(HashMap::new())),
-            prekeys: Arc::new(Mutex::new(HashMap::new())),
-            queues: Arc::new(Mutex::new(HashMap::new())),
             known: Arc::new(Mutex::new(HashSet::new())),
+            forwarded: Arc::new(AtomicU64::new(0)),
+            rejected: Arc::new(AtomicU64::new(0)),
+            big_messages: Arc::new(Semaphore::new(MAX_CONCURRENT_BIG_MESSAGES)),
         }
     }
 
@@ -72,32 +68,60 @@ impl AppState {
         self.next_conn_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub fn next_message_id(&self) -> u64 {
-        self.next_msg_id.fetch_add(1, Ordering::Relaxed)
-    }
-
     pub fn connections(&self) -> MutexGuard<'_, HashMap<AccountId, Connection>> {
         self.connections.lock().expect("connections mutex poisoned")
     }
 
-    pub fn challenges(&self) -> MutexGuard<'_, HashMap<AccountId, Challenge>> {
-        self.challenges.lock().expect("challenges mutex poisoned")
+    pub fn is_current_connection(&self, account: AccountId, conn_id: u64) -> bool {
+        self.connections()
+            .get(&account)
+            .is_some_and(|connection| connection.conn_id == conn_id)
     }
 
-    pub fn prekeys(&self) -> MutexGuard<'_, HashMap<AccountId, VecDeque<PreKeyUpload>>> {
-        self.prekeys.lock().expect("prekeys mutex poisoned")
-    }
-
-    pub fn queues(&self) -> MutexGuard<'_, HashMap<AccountId, VecDeque<QueuedMessage>>> {
-        self.queues.lock().expect("queues mutex poisoned")
+    pub fn remove_connection(&self, account: AccountId, conn_id: u64) {
+        let mut connections = self.connections();
+        if connections
+            .get(&account)
+            .is_some_and(|connection| connection.conn_id == conn_id)
+        {
+            connections.remove(&account);
+        }
     }
 
     pub fn known(&self) -> MutexGuard<'_, HashSet<AccountId>> {
         self.known.lock().expect("known mutex poisoned")
     }
 
-    /// 这个实例见过该账号（注册或成功登录过）。
+    /// 这个实例见过该账号（注册或成功登录过），用于拒绝随机 ID 的投递。
     pub fn is_known(&self, account_id: AccountId) -> bool {
         self.known().contains(&account_id)
+    }
+
+    pub fn mark_known(&self, account_id: AccountId) {
+        self.known().insert(account_id);
+    }
+
+    pub fn count_forwarded(&self) {
+        self.forwarded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn count_rejected(&self) {
+        self.rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn connection_count(&self) -> usize {
+        self.connections().len()
+    }
+
+    pub fn forwarded(&self) -> u64 {
+        self.forwarded.load(Ordering::Relaxed)
+    }
+
+    pub fn rejected(&self) -> u64 {
+        self.rejected.load(Ordering::Relaxed)
+    }
+
+    pub fn big_messages(&self) -> &Semaphore {
+        &self.big_messages
     }
 }
