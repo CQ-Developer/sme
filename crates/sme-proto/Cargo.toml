@@ -3,3 +3,8 @@ name = "sme-proto"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+getrandom = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true }

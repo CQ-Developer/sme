@@ -10,6 +10,7 @@
 > - v0.6：v1 范围收敛为**文本 + 图片**（图片 ≤1MB，客户端压缩并剥离 EXIF；不支持文件与视频）；**取消 E2EE-ack 与已读回执**（D22：双方互相感知不到状态）；D7 修订为 TTL 24 小时 + 字节配额；确认 v1 不接入任何推送（D19）；新增 I12、`sme-media` crate；基础设施规格见 `docs/INFRA.md`。
 > - v0.7：M0 落地（workspace 骨架 + 三条 CI 门禁 + compose/migration + I3/I11 测试）；新增 D23（keystore AEAD）与 D24（Argon2id 默认参数）。
 > - v0.8：M1 完成——Olm 账号与会话经 KEK 加密跨重启恢复（条目 `olm.account` / `olm.session.<id>`），Argon2id 通过官方参考实现的 KAT。
+> - v0.9：M2 起步——`sme-proto` 线路协议落地（账号 ID base32、控制帧 + Olm 信封、postcard 严格编解码）；查询方案选 A（D25），workspace MSRV 提到 1.94（sqlx 0.9 要求）。
 
 ## 1. 产品定位（一句话）
 
@@ -171,18 +172,22 @@ Cargo workspace（Rust）
 2. 登录 = 服务端发随机挑战，客户端用 Ed25519 签名。**口令与私钥永不出网、服务端不存口令**（也省掉了口令哈希库的泄露风险）。
 3. 每条消息的加密是独立的密文信封；服务端只做盲转发。
 
-### 6.3 线路信封（草案）
+### 6.3 线路协议（M2 落地，实现见 `crates/sme-proto`）
+
+控制帧与消息帧共用 postcard 编码；解码严格（拒绝多余字节、未知分支与超限字段），单帧 ≤ 1.2MB（`MAX_FRAME_BYTES`）。
+
+- **控制帧**：`Register` / `ChallengeRequest` / `Challenge` / `Login` / `LoginAck` / `UploadPreKeys` / `FetchPreKey` / `PreKeyBundle` / `SendAck`（Q-ack）/ `DeliverAck`（D-ack）/ `Error`
+- **消息帧 `Envelope`**：
 
 | 字段 | 说明 |
 | --- | --- |
-| `v` | 协议版本，为将来升级留位 |
-| `type` | `msg` / `ack` / `presence` / `handshake` |
+| `v` | 协议版本，当前 `PROTOCOL_VERSION = 1` |
 | `from` / `to` | 账号标识（服务端可见的元数据） |
-| `sid` | 会话 ID，用于多会话与重放窗口 |
-| `n` / `iv` | 消息序号与 nonce |
-| `ct` | 密文载荷（含内容、时间戳、消息类型） |
+| `sid` | Olm 会话 ID（客户端本地标识，便于路由与排障） |
+| `kind` | Olm 消息种类：`PreKey` / `Normal` |
+| `payload` | Olm 密文原始字节（≤1.1MB） |
 
-明文侧信息（时间戳、消息类型）放进密文里，避免服务端通过它们做推断。
+修订说明（v0.9）：原草案的 `n` / `iv` 属于自设计信封；改用 vodozemac Olm 后，消息序号与 nonce 由 Olm 内部管理，不再出现在线路上。时间戳与内容一样留在密文里。
 
 ### 6.4 送达与确认（对应 D1）
 
@@ -271,6 +276,7 @@ Cargo workspace（Rust）
 | **D22** | ACK 与状态感知 | ✅ 只有 Q-ack 与 D-ack，**无 E2EE-ack、无已读回执、无 presence 展示**：收发双方互相推断不到对方状态 |
 | **D23** | 本地 keystore 的 AEAD 原语 | ✅ **ChaCha20-Poly1305**（RustCrypto `chacha20poly1305`）：随机 96-bit nonce 附在密文前，AAD = keystore 头部；**不使用** vodozemac `hazmat::Cipher`（其 IV 由密钥确定性导出，只适用于一次性消息密钥） |
 | **D24** | Argon2id 默认参数 | ✅ OWASP 第一档：`m_cost = 19456 KiB, t_cost = 2, p_cost = 1`；参数随 keystore 头保存，将来可升级并重包裹 |
+| **D25** | sqlx 查询方式 | ✅ 方案 A：运行时 `query_as` + `migrate!`（不需要 sqlx-cli，不提交 `.sqlx`）；M2 迭代快，查询面稳定后再评估切编译期宏。sqlx 0.9 要求 MSRV ≥ 1.94，workspace 已同步 |
 
 ### 10.2 待定
 
