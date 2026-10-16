@@ -40,12 +40,12 @@ def scan(root: Path) -> list[str]:
             try:
                 text = source.read_text(encoding="utf-8")
             except OSError as error:
-                violations.append(f"{source}: 无法读取: {error}")
+                violations.append(f"{source}: cannot read: {error}")
                 continue
             for line_number, line in enumerate(text.splitlines(), start=1):
                 for token in FORBIDDEN:
                     if token in line:
-                        violations.append(f"{source.relative_to(root)}:{line_number}: 命中 {token!r}")
+                        violations.append(f"{source.relative_to(root)}:{line_number}: matches {token!r}")
     return violations
 
 
@@ -53,11 +53,11 @@ def main(argv: list[str]) -> int:
     root = Path(argv[1]).resolve() if len(argv) > 1 else Path(__file__).resolve().parents[2]
     violations = scan(root)
     if violations:
-        print("I2 门禁失败：核心 crate 出现了禁止的 IO / 网络 / 进程 API")
+        print("I2 gate failed: core crates use a forbidden IO / network / process API")
         for violation in violations:
             print(f"  {violation}")
         return 1
-    print(f"I2 门禁通过：{', '.join(CORE_CRATES)} 无禁止 API")
+    print(f"I2 gate passed: {', '.join(CORE_CRATES)} use no forbidden APIs")
     return 0
 
 

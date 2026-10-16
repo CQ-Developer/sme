@@ -115,7 +115,11 @@ fn duplicate_delivery_is_acked_but_not_shown() {
     assert!(second.iter().any(
         |action| matches!(action, Action::Send(Frame::DeliverAck { msg_id }) if msg_id == "7")
     ));
-    assert_eq!(bob.buffer().len(), 1, "重复投递不得重复显示");
+    assert_eq!(
+        bob.buffer().len(),
+        1,
+        "duplicate delivery must not be shown twice"
+    );
 }
 
 #[test]

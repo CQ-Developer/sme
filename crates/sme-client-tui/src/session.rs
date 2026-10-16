@@ -278,7 +278,7 @@ fn to_event(action: Action) -> Event {
         Action::ServerError { code, detail } => Event::ServerError { code, detail },
         Action::ProtocolError { detail } => Event::ProtocolError { detail },
         Action::Send(_) | Action::Persist => {
-            unreachable!("Send/Persist 已在 run_actions 中处理")
+            unreachable!("Send/Persist are handled in run_actions")
         }
     }
 }

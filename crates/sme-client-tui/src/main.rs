@@ -68,7 +68,7 @@ async fn run(
         keystore_path,
         password: Zeroizing::new(String::new()),
         session: None,
-        status: "输入口令后按 Enter（首次运行会创建账号）".to_string(),
+        status: "Enter a passphrase and press Enter (first run creates an account)".to_string(),
         messages: Vec::new(),
         dropped: 0,
         input: Zeroizing::new(String::new()),
@@ -93,7 +93,7 @@ async fn run(
                     Ok(event) => apply_event(&mut app, event),
                     Err(error) => {
                         app.session = None;
-                        app.status = format!("连接断开（{error}）；输入口令按 Enter 重连");
+                        app.status = format!("Disconnected ({error}); enter the passphrase and press Enter to reconnect");
                     }
                 },
             }
@@ -110,7 +110,7 @@ async fn run(
 
         if app.session.is_some() && app.last_activity.elapsed() > IDLE_LIMIT {
             app.session = None;
-            app.status = "空闲锁定：明文与会话已从内存擦除，输入口令按 Enter 解锁".to_string();
+            app.status = "Idle lock: plaintext and sessions wiped from memory; enter the passphrase and press Enter to unlock".to_string();
         }
         if app.quit {
             return Ok(());
@@ -130,7 +130,7 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
             app.messages.clear();
             app.input.clear();
             app.password.clear();
-            app.status = "已紧急擦除：内存清空，本地 keystore 已删除".to_string();
+            app.status = "Emergency wipe done: memory cleared, local keystore deleted".to_string();
             app.quit = true;
         }
         (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
@@ -166,20 +166,20 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
 
 async fn connect(app: &mut App) {
     if app.password.is_empty() {
-        app.status = "先输入口令".to_string();
+        app.status = "Enter the passphrase first".to_string();
         return;
     }
-    app.status = "连接中…".to_string();
+    app.status = "Connecting…".to_string();
     match Session::connect(&app.server, &app.keystore_path, app.password.as_bytes()).await {
         Ok(mut session) => {
-            app.status = format!("已登录 {}", session.account_id());
+            app.status = format!("Logged in as {}", session.account_id());
             // Also upload a batch of one-time prekeys so peers can start a handshake.
             let _ = session
                 .upload_prekeys(sme_client_tui::session::PREKEY_BATCH)
                 .await;
             app.session = Some(session);
         }
-        Err(error) => app.status = format!("连接失败: {error}"),
+        Err(error) => app.status = format!("Connection failed: {error}"),
     }
 }
 
@@ -197,26 +197,26 @@ async fn send_input(app: &mut App) {
                 if let Some(session) = app.session.as_mut()
                     && let Err(error) = session.fetch_prekey(peer).await
                 {
-                    app.status = format!("拉取预密钥失败: {error}");
+                    app.status = format!("Failed to fetch prekey: {error}");
                     return;
                 }
-                app.status = format!("对端已设为 {peer}（已请求预密钥）");
+                app.status = format!("Peer set to {peer} (prekey requested)");
             }
-            Err(_) => app.status = "账号 ID 格式无效（26 位 base32）".to_string(),
+            Err(_) => app.status = "Invalid account ID (26 base32 characters)".to_string(),
         }
         return;
     }
 
     let Some(peer) = app.peer else {
-        app.status = "先用 /peer <账号> 选择对端".to_string();
+        app.status = "Pick a peer first with /peer <account-id>".to_string();
         return;
     };
     let Some(session) = app.session.as_mut() else {
         return;
     };
     match session.send_text(peer, text.as_bytes()).await {
-        Ok(()) => push_message(app, "我".to_string(), text),
-        Err(error) => app.status = format!("发送失败: {error}"),
+        Ok(()) => push_message(app, "me".to_string(), text),
+        Err(error) => app.status = format!("Send failed: {error}"),
     }
 }
 
@@ -224,14 +224,16 @@ fn apply_event(app: &mut App, event: Event) {
     match event {
         Event::Received { from, text } => push_message(app, from.to_string(), text),
         Event::DecryptFailed { from } => {
-            app.status = format!("丢弃了一条重复/无法解密的消息（来自 {from}）");
+            app.status = format!("Dropped a duplicate/undecryptable message (from {from})");
         }
         Event::ServerError { code, detail } => {
-            app.status = format!("服务端错误 {code:?}: {detail}");
+            app.status = format!("Server error {code:?}: {detail}");
         }
         Event::Ready | Event::Registered | Event::Sent { .. } | Event::PreKeysUploaded { .. } => {}
-        Event::SessionEstablished { peer } => app.status = format!("与 {peer} 的会话已建立"),
-        Event::ProtocolError { detail } => app.status = format!("协议错误: {detail}"),
+        Event::SessionEstablished { peer } => {
+            app.status = format!("Session established with {peer}")
+        }
+        Event::ProtocolError { detail } => app.status = format!("Protocol error: {detail}"),
     }
 }
 
@@ -257,7 +259,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     if app.dropped > 0 {
         lines.push(Line::from(Span::styled(
             format!(
-                "—— {} 条更早消息已按策略丢弃（明文只保留最近 {UI_MESSAGE_LIMIT} 条）——",
+                "— {} older messages dropped by policy (only the latest {UI_MESSAGE_LIMIT} are kept) —",
                 app.dropped
             ),
             Style::default().fg(Color::DarkGray),
@@ -268,7 +270,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            "这里是空白：本应用不保存历史，重启后对话清空。",
+            "Blank by design: no history is stored, the conversation is empty after a restart.",
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -276,7 +278,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("sme · 端到端加密（消息仅在内存，≤10 条）"),
+                .title("sme · end-to-end encrypted (messages in memory only, max 10)"),
         ),
         chunks[0],
     );
@@ -284,12 +286,12 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     let (input_text, title) = if app.session.is_some() {
         (
             app.input.as_str(),
-            "输入：Enter 发送 · /peer <账号> 选对端 · Ctrl+X 紧急擦除",
+            "Input: Enter sends · /peer <account-id> picks a peer · Ctrl+X emergency wipe",
         )
     } else {
         (
             app.password.as_str(),
-            "口令：Enter 解锁/登录 · Ctrl+X 紧急擦除并删除本地数据",
+            "Passphrase: Enter unlocks/signs in · Ctrl+X wipes memory and deletes local data",
         )
     };
     frame.render_widget(

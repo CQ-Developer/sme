@@ -9,9 +9,9 @@ services:
   gateway:
     build: .
     environment:
-      DATABASE_URL: postgres://sme:${POSTGRES_PASSWORD:?必须显式提供}@postgres/sme
+      DATABASE_URL: postgres://sme:${POSTGRES_PASSWORD:?must be set}@postgres/sme
       VALKEY_URL: redis://valkey:6379
-      SME_HMAC_KEY: ${SME_HMAC_KEY:?必须显式提供}
+      SME_HMAC_KEY: ${SME_HMAC_KEY:?must be set}
     depends_on:
       postgres: {condition: service_healthy}
       valkey:   {condition: service_healthy}
@@ -21,7 +21,7 @@ services:
     environment:
       POSTGRES_USER: sme
       POSTGRES_DB: sme
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须显式提供}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?must be set}
     volumes: [pgdata:/var/lib/postgresql]   # PG 18+ convention: data lives in <mount>/18/docker, enabling pg_upgrade --link
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sme -d sme"]

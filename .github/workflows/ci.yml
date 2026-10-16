@@ -6,13 +6,13 @@ on:
 
 jobs:
   gates:
-    name: 不变式门禁（I1 / I2 / Valkey 禁持久化）
+    name: Invariant gates (I1 / I2 / Valkey no-persistence)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: 准备 Python 依赖（PyYAML）
+      - name: Prepare Python dependency (PyYAML)
         run: python3 -c 'import yaml' || python3 -m pip install pyyaml
-      - name: 运行门禁与注入自检
+      - name: Run gates and injection self-tests
         run: python3 scripts/ci/run_gates.py
 
   test:

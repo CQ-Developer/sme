@@ -62,10 +62,10 @@ impl ValkeyContainer {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output()
-            .map_err(|error| format!("无法启动 docker：{error}"))?;
+            .map_err(|error| format!("cannot start docker: {error}"))?;
         if !output.status.success() {
             return Err(format!(
-                "docker run 失败：{}",
+                "docker run failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
@@ -94,9 +94,9 @@ impl ValkeyContainer {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .status()
-            .map_err(|error| format!("docker restart 失败：{error}"))?;
+            .map_err(|error| format!("docker restart failed: {error}"))?;
         if !status.success() {
-            return Err(format!("docker restart {} 返回 {status}", self.name));
+            return Err(format!("docker restart {} returned {status}", self.name));
         }
         self.wait_ready().await
     }
@@ -108,7 +108,7 @@ impl ValkeyContainer {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     if Instant::now() >= deadline {
-                        return Err(format!("Valkey 未就绪：{error}"));
+                        return Err(format!("Valkey is not ready: {error}"));
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
@@ -121,7 +121,7 @@ impl ValkeyContainer {
         let output = Command::new("docker")
             .args(["logs", &self.name])
             .output()
-            .map_err(|error| format!("docker logs 失败：{error}"))?;
+            .map_err(|error| format!("docker logs failed: {error}"))?;
         Ok(String::from_utf8_lossy(&output.stdout).into_owned()
             + &String::from_utf8_lossy(&output.stderr))
     }
@@ -153,11 +153,11 @@ async fn ping(url: &str) -> Result<(), String> {
 /// Ask the OS for a free port (a tiny race, acceptable in tests).
 pub fn free_port() -> Result<u16, String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|error| format!("无法分配空闲端口：{error}"))?;
+        .map_err(|error| format!("cannot allocate a free port: {error}"))?;
     listener
         .local_addr()
         .map(|addr| addr.port())
-        .map_err(|error| format!("无法读取本地端口：{error}"))
+        .map_err(|error| format!("cannot read the local port: {error}"))
 }
 
 /// Self-cleaning temp directory.

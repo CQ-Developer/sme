@@ -26,22 +26,22 @@ def check(compose_path: Path) -> list[str]:
     try:
         document = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as error:
-        return [f"无法解析 {compose_path}: {error}"]
+        return [f"cannot parse {compose_path}: {error}"]
 
     services = (document or {}).get("services") or {}
     valkey = services.get("valkey")
     if not isinstance(valkey, dict):
-        return [f"{compose_path}: 找不到 services.valkey"]
+        return [f"{compose_path}: services.valkey not found"]
 
     problems: list[str] = []
     if valkey.get("volumes"):
-        problems.append("valkey 挂载了 volumes（必须只存在于 tmpfs）")
+        problems.append("valkey mounts volumes (it must live on tmpfs only)")
 
     tmpfs = valkey.get("tmpfs") or []
     if isinstance(tmpfs, str):
         tmpfs = [tmpfs]
     if not any(str(entry).startswith("/data") for entry in tmpfs):
-        problems.append("valkey 缺少 tmpfs /data")
+        problems.append("valkey is missing the tmpfs /data mount")
 
     command = valkey.get("command") or ""
     if isinstance(command, list):
@@ -49,15 +49,15 @@ def check(compose_path: Path) -> list[str]:
     command = str(command)
 
     required = (
-        (r'--save\s+(""|\'\')', '--save ""（关闭 RDB 快照）'),
-        (r"--appendonly\s+no\b", "--appendonly no（关闭 AOF）"),
+        (r'--save\s+(""|\'\')', '--save "" (RDB snapshots off)'),
+        (r"--appendonly\s+no\b", "--appendonly no (AOF off)"),
         (r"--maxmemory\s+1gb\b", "--maxmemory 1gb"),
         (r"--maxmemory-policy\s+noeviction\b", "--maxmemory-policy noeviction"),
         (r"--dir\s+/data\b", "--dir /data"),
     )
     for pattern, description in required:
         if not re.search(pattern, command):
-            problems.append(f"valkey 启动参数缺少 {description}")
+            problems.append(f"valkey command is missing {description}")
 
     return problems
 
@@ -67,11 +67,11 @@ def main(argv: list[str]) -> int:
     compose_path = Path(argv[1]).resolve() if len(argv) > 1 else default
     problems = check(compose_path)
     if problems:
-        print(f"Valkey 禁持久化门禁失败：{compose_path}")
+        print(f"Valkey no-persistence gate failed: {compose_path}")
         for problem in problems:
             print(f"  {problem}")
         return 1
-    print(f"Valkey 禁持久化门禁通过：{compose_path}")
+    print(f"Valkey no-persistence gate passed: {compose_path}")
     return 0
 
 

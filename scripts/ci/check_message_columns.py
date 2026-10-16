@@ -40,7 +40,7 @@ def scan_sql_file(root: Path, source: Path) -> list[str]:
     for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
         match = FORBIDDEN_RE.search(line)
         if match:
-            violations.append(f"{source.relative_to(root)}:{line_number}: 命中 {match.group(0)!r}")
+            violations.append(f"{source.relative_to(root)}:{line_number}: matches {match.group(0)!r}")
     return violations
 
 
@@ -54,7 +54,7 @@ def scan_rust_file(root: Path, source: Path) -> list[str]:
             match = FORBIDDEN_RE.search(content)
             if match:
                 violations.append(
-                    f"{source.relative_to(root)}:{line_number}: 命中 {match.group(0)!r}"
+                    f"{source.relative_to(root)}:{line_number}: matches {match.group(0)!r}"
                 )
     return violations
 
@@ -65,12 +65,12 @@ def scan(root: Path) -> list[str]:
         try:
             violations += scan_sql_file(root, source)
         except OSError as error:
-            violations.append(f"{source}: 无法读取: {error}")
+            violations.append(f"{source}: cannot read: {error}")
     for source in sorted((root / "crates").rglob("*.rs")):
         try:
             violations += scan_rust_file(root, source)
         except OSError as error:
-            violations.append(f"{source}: 无法读取: {error}")
+            violations.append(f"{source}: cannot read: {error}")
     return violations
 
 
@@ -78,11 +78,11 @@ def main(argv: list[str]) -> int:
     root = Path(argv[1]).resolve() if len(argv) > 1 else Path(__file__).resolve().parents[2]
     violations = scan(root)
     if violations:
-        print("I1 门禁失败：迁移或 SQL 查询里出现了聊天内容列名")
+        print("I1 gate failed: migrations or SQL queries use a chat-content column name")
         for violation in violations:
             print(f"  {violation}")
         return 1
-    print("I1 门禁通过：migrations/ 与 .rs 内联 SQL 无聊天内容列名")
+    print("I1 gate passed: no chat-content column names in migrations/ or inline .rs SQL")
     return 0
 
 

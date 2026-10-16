@@ -24,7 +24,7 @@ async fn start_server() -> Option<(String, ValkeyContainer)> {
     let container = match ValkeyContainer::ephemeral().await {
         Ok(container) => container,
         Err(error) => {
-            eprintln!("跳过端到端测试：无法启动 Valkey 容器（{error}）");
+            eprintln!("skipping end-to-end test: cannot start Valkey container ({error})");
             return None;
         }
     };
@@ -84,7 +84,7 @@ fn assert_no_plaintext(dir: &Path, plaintext: &[u8]) {
                 !bytes
                     .windows(plaintext.len())
                     .any(|window| window == plaintext),
-                "{} 里出现了明文消息",
+                "plaintext message found in {}",
                 path.display()
             );
         }
@@ -94,7 +94,7 @@ fn assert_no_plaintext(dir: &Path, plaintext: &[u8]) {
 #[tokio::test]
 async fn two_clients_chat_and_resume_after_restart() {
     let Some((url, _valkey)) = start_server().await else {
-        eprintln!("跳过端到端测试：未设置 DATABASE_URL");
+        eprintln!("skipping end-to-end test: DATABASE_URL is not set");
         return;
     };
 
@@ -181,7 +181,7 @@ async fn two_clients_chat_and_resume_after_restart() {
 #[tokio::test]
 async fn emergency_wipe_deletes_local_state() {
     let Some((url, _valkey)) = start_server().await else {
-        eprintln!("跳过端到端测试：未设置 DATABASE_URL");
+        eprintln!("skipping end-to-end test: DATABASE_URL is not set");
         return;
     };
 

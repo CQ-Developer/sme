@@ -41,7 +41,7 @@ async fn test_pool() -> Option<sqlx::PgPool> {
 #[tokio::test]
 async fn i1_persistent_schema_has_no_message_columns() {
     let Some(pool) = test_pool().await else {
-        eprintln!("跳过 I1：未设置 DATABASE_URL");
+        eprintln!("skipping I1: DATABASE_URL is not set");
         return;
     };
 
@@ -57,7 +57,7 @@ async fn i1_persistent_schema_has_no_message_columns() {
     assert_eq!(
         names,
         vec!["_sqlx_migrations", "accounts"],
-        "持久层只允许 accounts 与 sqlx 迁移表"
+        "the persistent layer may only contain accounts and the sqlx migrations table"
     );
 
     let columns: Vec<(String, String)> = sqlx::query_as(
@@ -82,7 +82,7 @@ async fn i1_persistent_schema_has_no_message_columns() {
         for word in FORBIDDEN {
             assert!(
                 !column.contains(word),
-                "列 {table}.{column} 命中禁词 {word}"
+                "column {table}.{column} contains forbidden word {word}"
             );
         }
     }
@@ -92,13 +92,13 @@ async fn i1_persistent_schema_has_no_message_columns() {
 #[tokio::test]
 async fn i5_server_logs_never_contain_ciphertext_payload() {
     let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
-        eprintln!("跳过 I5：未设置 DATABASE_URL");
+        eprintln!("skipping I5: DATABASE_URL is not set");
         return;
     };
     let valkey = match ValkeyContainer::ephemeral().await {
         Ok(container) => container,
         Err(error) => {
-            eprintln!("跳过 I5：无法启动 Valkey 容器（{error}）");
+            eprintln!("skipping I5: cannot start Valkey container ({error})");
             return;
         }
     };
@@ -132,7 +132,7 @@ async fn i5_server_logs_never_contain_ciphertext_payload() {
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "sme-server 未在超时内启动"
+            "sme-server did not start within the timeout"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
@@ -180,7 +180,7 @@ async fn i5_server_logs_never_contain_ciphertext_payload() {
     let logs = logs.lock().unwrap().clone();
     assert!(
         !logs.contains(canary),
-        "服务端输出流里出现了消息内容：\n{logs}"
+        "message content appeared in server output:\n{logs}"
     );
 }
 
@@ -199,14 +199,14 @@ async fn i7_startup_refuses_persistent_valkey() {
     let persistent = match ValkeyContainer::with_appendonly().await {
         Ok(container) => container,
         Err(error) => {
-            eprintln!("跳过 I7：无法启动 Valkey 容器（{error}）");
+            eprintln!("skipping I7: cannot start Valkey container ({error})");
             return;
         }
     };
     let result = Valkey::connect(persistent.url(), HMAC_KEY, "i7-test".to_string()).await;
     assert!(
         matches!(result, Err(ValkeyError::NotEphemeral(_))),
-        "appendonly=yes 的 Valkey 必须被拒绝"
+        "Valkey with appendonly=yes must be rejected"
     );
 
     let ephemeral = ValkeyContainer::ephemeral().await.expect("start valkey");
@@ -223,7 +223,7 @@ async fn i8_restart_leaves_no_ciphertext() {
     let container = match ValkeyContainer::ephemeral().await {
         Ok(container) => container,
         Err(error) => {
-            eprintln!("跳过 I8：无法启动 Valkey 容器（{error}）");
+            eprintln!("skipping I8: cannot start Valkey container ({error})");
             return;
         }
     };
@@ -261,6 +261,6 @@ async fn i8_restart_leaves_no_ciphertext() {
         .expect("reconnect valkey");
     assert!(
         valkey.queued(account).await.unwrap().is_empty(),
-        "Valkey 重启后不得残留任何密文"
+        "no ciphertext may survive a Valkey restart"
     );
 }

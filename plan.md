@@ -15,6 +15,7 @@
 > - v0.11：M3 完成——队列 / 预密钥 / 挑战 / presence / 限流全部进入 Valkey（D17 HMAC 键名、Stream TTL 24h、D-ack 原子删）；网关无状态；启动自检 I7；新增 I1/I5/I7/I8 不变式测试。
 > - v0.12：M4 完成——ratatui 参考客户端（仅文本：`/peer` 选对端、Ctrl+X 紧急擦除、空闲锁定）；消息缓冲与会话全链路 `Zeroize`；I4（应用目录金丝雀扫描）与 I6（类型级 zeroize 契约 + wipe 语义）测试；新增 `LocalConfig`。
 > - v0.13：产品调整——桌面三平台统一 TUI（D4a′ 修订，取消 egui/iced 路线；M6 改为平台适配）；代码注释全部改为英文。
+> - v0.14：确认终端图片能力——桌面 TUI 用 `ratatui-image` 支持 Kitty / Sixel / iTerm2 内联图片预览，回退 unicode halfblocks，并提供「另存为」（D26）；运行时字符串（含 TUI 文案）全部改英文。
 
 ## 1. 产品定位（一句话）
 
@@ -53,7 +54,7 @@
 - 系统 swap / 休眠（suspend-to-disk）
 - TLS session ticket 缓存、DNS 缓存
 - 剪贴板、系统通知中心、输入法词库
-- 终端回滚缓冲 / tmux / screen 日志（桌面统一 TUI 后的字节旁路）
+- 终端回滚缓冲 / tmux / screen 日志（桌面统一 TUI 后的字节旁路；内联图片像素也会先进入终端仿真器）
 - 崩溃上报、遥测、自动更新残留
 
 因此「无落盘」必须是一个**可验证的约束**（见 §7 不变式），而不是口号。
@@ -65,7 +66,7 @@ flowchart TB
   subgraph CL["客户端：同一 Rust 核心，多平台外壳"]
     IOS["iOS · SwiftUI"]
     AND["Android · Jetpack Compose"]
-    TUI["Windows / macOS / Linux · TUI (ratatui)<br/>参考实现"]
+    TUI["Windows / macOS / Linux · TUI (ratatui)<br/>参考实现 · 文本 + 图片预览"]
     FFI["uniffi 绑定层"]
     CFILE["本地 keystore（AEAD 加密）<br/>身份密钥 · Olm 账号与会话<br/>通讯录 · TOFU pin<br/>不含任何消息"]
     CORE["sme-client-core<br/>Olm 会话 · 明文缓冲 ≤ 10 条<br/>口令 → 密钥 (Argon2id) · 禁止 IO · zeroize"]
@@ -114,7 +115,7 @@ Cargo workspace（Rust）
     sme-client-store/  本地 keystore：加解密并读写密钥材料与用户信息（唯一允许写盘的客户端 crate）
     sme-client-net/    WebSocket 传输、重连、心跳（唯一允许网络的客户端 crate）
     sme-ffi/           uniffi 绑定层：导出给 Swift / Kotlin
-    sme-client-tui/    桌面三平台参考客户端（Windows/macOS/Linux，ratatui，仅文本）
+    sme-client-tui/    桌面三平台参考客户端（Windows/macOS/Linux，ratatui，文本 + 图片预览/另存为）
     sme-server/        axum 网关：认证、在线状态、共享队列访问、限流
   apps/
     ios/               SwiftUI 外壳：渲染 + 输入 + 平台生命周期
@@ -239,9 +240,9 @@ Cargo workspace（Rust）
 | M1 | crypto 与 keystore：KEK 派生（Argon2id）、身份密钥生成、Olm 账号与会话的加密落盘/恢复 | 两个进程走通「首次注册 → 退出 → 重启 → 身份与会话不变」；测试向量通过 |
 | M2 | 接入 `sme-client-net` + 服务端，完成 1:1 实时聊天 | 端到端集成测试：服务端只见到密文；会话状态跨重启恢复 |
 | M3 | 横向扩展改造：无状态网关 + 共享易失队列 + TTL + ACK 即删 + 限流 + 在线状态 + 启动自检 | 不变式 I1、I5、I7、I8 测试通过 |
-| M4 | TUI 参考客户端（**仅文本**）+ 零消息落盘加固（`zeroize`、紧急擦除、syscall 断言） | 不变式 I2、I3、I4、I6、I11 测试通过（Linux/macOS/Windows） |
-| M5 | 移动端：uniffi + iOS/Android 外壳 + `sme-media` 图片链路（压缩 / 剥离 EXIF / 解压炸弹防御）+ 平台加固（防快照） | 沙箱目录审计通过；I12 通过 |
-| M6 | 桌面三平台（Windows/macOS/Linux）TUI 适配与平台审计（构建、数据目录、权限） | 三平台构建通过；复用 M4 的不变式测试 |
+| M4 | TUI 参考客户端（文本）+ 零消息落盘加固（`zeroize`、紧急擦除、syscall 断言）；图片显示在 M6 接入（D26） | 不变式 I2、I3、I4、I6、I11 测试通过（Linux/macOS/Windows） |
+| M5 | 移动端：uniffi + iOS/Android 外壳 + `sme-media` 图片链路（压缩 / 剥离 EXIF / 解压炸弹防御）+ 图文消息正文格式 + 平台加固（防快照） | 沙箱目录审计通过；I12 通过 |
+| M6 | 桌面三平台（Windows/macOS/Linux）TUI 适配、图片内联预览（ratatui-image）与「另存为」、平台审计 | 三平台构建通过；复用 M4 的不变式测试 |
 | M7（后续） | 安全码核对 UI（SAS）、群聊（Megolm/MLS）、元数据保护；**文件与视频**（平台原生编码器，不用 FFmpeg） | — |
 
 ## 10. 决策记录
@@ -278,6 +279,7 @@ Cargo workspace（Rust）
 | **D23** | 本地 keystore 的 AEAD 原语 | ✅ **ChaCha20-Poly1305**（RustCrypto `chacha20poly1305`）：随机 96-bit nonce 附在密文前，AAD = keystore 头部；**不使用** vodozemac `hazmat::Cipher`（其 IV 由密钥确定性导出，只适用于一次性消息密钥） |
 | **D24** | Argon2id 默认参数 | ✅ OWASP 第一档：`m_cost = 19456 KiB, t_cost = 2, p_cost = 1`；参数随 keystore 头保存，将来可升级并重包裹 |
 | **D25** | sqlx 查询方式 | ✅ 方案 A：运行时 `query_as` + `migrate!`（不需要 sqlx-cli，不提交 `.sqlx`）；M2 迭代快，查询面稳定后再评估切编译期宏。sqlx 0.9 要求 MSRV ≥ 1.94，workspace 已同步 |
+| **D26** | 桌面 TUI 图片显示 | ✅ 用 `ratatui-image` 11.x（`default-features = false`，不带 chafa 本地库）：自动探测 Kitty / iTerm2 / Sixel 图形协议，失败回退 unicode halfblocks（探测顺序由 crate 决定）。Kitty 走 direct 传输（`t=d`），不写临时文件；tmux/ssh 下图形协议可能无法穿透，此时自动退 halfblocks。另提供「另存为」作为无图形终端的出口。图片解码缓冲属 UI 边界，渲染后尽快释放 |
 
 ### 10.2 待定
 

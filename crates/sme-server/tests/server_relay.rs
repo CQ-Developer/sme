@@ -26,7 +26,7 @@ async fn test_server() -> Option<(String, ValkeyContainer)> {
     let container = match ValkeyContainer::ephemeral().await {
         Ok(container) => container,
         Err(error) => {
-            eprintln!("跳过服务端集成测试：无法启动 Valkey 容器（{error}）");
+            eprintln!("skipping server integration test: cannot start Valkey container ({error})");
             return None;
         }
     };
@@ -67,7 +67,7 @@ async fn test_server() -> Option<(String, ValkeyContainer)> {
 #[tokio::test]
 async fn relay_delivers_only_ciphertext() {
     let Some((url, _valkey)) = test_server().await else {
-        eprintln!("跳过服务端集成测试：未设置 DATABASE_URL");
+        eprintln!("skipping server integration test: DATABASE_URL is not set");
         return;
     };
 
@@ -160,7 +160,7 @@ async fn relay_delivers_only_ciphertext() {
             .payload
             .windows(plaintext.len())
             .any(|window| window == plaintext),
-        "服务端不得让明文出现在线路上"
+        "the server must never put plaintext on the wire"
     );
 
     // Bob builds the inbound session from the pre-key message and decrypts it.
@@ -212,7 +212,7 @@ async fn relay_delivers_only_ciphertext() {
 #[tokio::test]
 async fn login_rejects_a_bad_signature() {
     let Some((url, _valkey)) = test_server().await else {
-        eprintln!("跳过服务端集成测试：未设置 DATABASE_URL");
+        eprintln!("skipping server integration test: DATABASE_URL is not set");
         return;
     };
 
@@ -257,7 +257,7 @@ async fn login_rejects_a_bad_signature() {
 #[tokio::test]
 async fn a_new_login_kicks_the_previous_connection() {
     let Some((url, _valkey)) = test_server().await else {
-        eprintln!("跳过服务端集成测试：未设置 DATABASE_URL");
+        eprintln!("skipping server integration test: DATABASE_URL is not set");
         return;
     };
 

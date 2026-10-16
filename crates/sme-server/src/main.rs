@@ -8,7 +8,7 @@ use sme_server::{app, config::Config, state::AppState};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config = Config::from_env().map_err(|error| format!("配置错误: {error}"))?;
+    let config = Config::from_env().map_err(|error| format!("config error: {error}"))?;
 
     let pool = PgPoolOptions::new()
         .max_connections(16)
@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let instance_id = random_instance_id().map_err(|error| error.to_string())?;
     let valkey = Valkey::connect(&config.valkey_url, config.hmac_key.as_bytes(), instance_id)
         .await
-        .map_err(|error| format!("Valkey 启动自检失败: {error}"))?;
+        .map_err(|error| format!("Valkey startup self-check failed: {error}"))?;
 
     let listener = TcpListener::bind(config.bind).await?;
     let addr = listener.local_addr()?;

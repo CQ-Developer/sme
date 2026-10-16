@@ -95,7 +95,7 @@ impl std::fmt::Display for ValkeyError {
             Self::Redis(error) => write!(f, "valkey error: {error}"),
             Self::NotEphemeral(detail) => write!(
                 f,
-                "Valkey 必须禁用持久化（save=\"\"、appendonly no、noeviction），当前 {detail}"
+                "Valkey must have all persistence disabled (save=\"\", appendonly no, noeviction), currently {detail}"
             ),
             Self::BadValue(what) => write!(f, "valkey reply has an invalid {what}"),
             Self::RandomSource => write!(f, "OS random source unavailable"),
@@ -191,7 +191,8 @@ impl Valkey {
 
     /// D17: the first 32 hex characters of `HMAC-SHA256(server key, account ID)`.
     pub fn hmac_account(&self, account: AccountId) -> String {
-        let mut mac = HmacSha256::new_from_slice(&self.hmac_key).expect("HMAC 接受任意长度密钥");
+        let mut mac =
+            HmacSha256::new_from_slice(&self.hmac_key).expect("HMAC accepts keys of any length");
         mac.update(account.as_bytes());
         let digest = mac.finalize().into_bytes();
         to_hex(&digest[..16])

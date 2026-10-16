@@ -23,7 +23,7 @@ fn establish_sessions() -> (Account, Account, Session, Session) {
         .one_time_keys()
         .values()
         .next()
-        .expect("刚生成过 prekey");
+        .expect("prekey was just generated");
     bob.mark_keys_as_published();
 
     let mut alice_session = alice
@@ -32,7 +32,7 @@ fn establish_sessions() -> (Account, Account, Session, Session) {
 
     let pre_key = match alice_session.encrypt("hello bob").unwrap() {
         OlmMessage::PreKey(message) => message,
-        OlmMessage::Normal(_) => panic!("首条消息必须是 pre-key 消息"),
+        OlmMessage::Normal(_) => panic!("the first message must be a pre-key message"),
     };
     let inbound = bob
         .create_inbound_session(
@@ -66,7 +66,10 @@ fn account_and_session_survive_restart() {
     drop(alice);
 
     let keystore = Keystore::open(&path, PASSWORD).unwrap();
-    let alice_restored = keystore.load_account().unwrap().expect("账号必须能恢复");
+    let alice_restored = keystore
+        .load_account()
+        .unwrap()
+        .expect("account must be restorable");
     assert_eq!(alice_restored.identity_keys(), identity_before);
 
     let sessions = keystore.load_sessions().unwrap();

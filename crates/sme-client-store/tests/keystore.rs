@@ -29,8 +29,14 @@ fn keystore_file_is_ciphertext_only() {
     keystore.save().unwrap();
 
     let on_disk = fs::read(&path).unwrap();
-    assert!(!contains(&on_disk, &IDENTITY_CANARY), "身份私钥明文落盘了");
-    assert!(!contains(&on_disk, MESSAGE_CANARY), "消息字节落盘了");
+    assert!(
+        !contains(&on_disk, &IDENTITY_CANARY),
+        "identity private key reached disk in plaintext"
+    );
+    assert!(
+        !contains(&on_disk, MESSAGE_CANARY),
+        "message bytes reached disk"
+    );
 
     let reopened = Keystore::open(&path, PASSWORD).unwrap();
     assert_eq!(
@@ -42,7 +48,7 @@ fn keystore_file_is_ciphertext_only() {
 
     assert!(
         Keystore::open(&path, b"wrong password").is_err(),
-        "错误口令必须打不开"
+        "a wrong password must fail"
     );
 }
 
@@ -59,5 +65,5 @@ fn keystore_file_mode_is_0600() {
     keystore.save().unwrap();
 
     let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "keystore 权限必须是 0600，实际 {mode:o}");
+    assert_eq!(mode, 0o600, "keystore mode must be 0600, got {mode:o}");
 }
