@@ -4,6 +4,7 @@
 //! 负载在写盘前由 [`sme_crypto::seal`] 整体加密，只有口令派生的 KEK 能解开。
 //! 本 crate 不定义「消息」这种字段，调用方放进去的只是带名字的字节。
 
+mod config;
 mod olm;
 
 use std::collections::BTreeMap;
@@ -13,6 +14,8 @@ use std::path::PathBuf;
 
 use sme_crypto::{CryptoError, KEY_LEN, KdfParams, NONCE_LEN, SALT_LEN};
 use zeroize::Zeroizing;
+
+pub use config::LocalConfig;
 
 /// 文件头 magic：「SME Keystore」。
 const MAGIC: &[u8; 4] = b"SMEK";

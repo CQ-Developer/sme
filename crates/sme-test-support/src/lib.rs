@@ -177,6 +177,10 @@ impl TestDir {
     pub fn join(&self, name: &str) -> PathBuf {
         self.0.join(name)
     }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
 }
 
 impl Drop for TestDir {

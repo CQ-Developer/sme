@@ -202,7 +202,7 @@ Caddy 侧要点：只暴露 `443`（`80` 仅用于 ACME 与跳转）；对 HTTP 
 | --- | --- |
 | keystore 文件 | 版本化二进制：`magic + version + Argon2id 参数 + salt + nonce + AEAD 密文`；AEAD = ChaCha20-Poly1305（D23），AAD = 头部。密文内含身份密钥、Olm 账号与会话、通讯录、TOFU pin |
 | 写入方式 | 临时文件 + `rename` 原子替换；权限 `0600` |
-| 本地配置 | 账号 ID + KDF 盐与参数（不含秘密，单独文件，便于服务端不可用时也能解密 keystore） |
+| 本地配置 | `<keystore>.config.json`（`sme-client-store::LocalConfig`）：账号 ID + KDF 盐与参数，不含秘密。注册时提交给服务端的盐/参数取这里；keystore 文件头另有一份自包含的盐（本地 KEK 用），两者都是客户端生成 |
 | 目录 | Linux `~/.local/share/sme/`；macOS `~/Library/Application Support/sme/`；Windows `%APPDATA%\sme\`；iOS Application Support；Android 内部 files 目录 |
 | **图片** | 只存在于内存（≤10 条、≤8MB 预算）；**唯一落盘出口是用户显式「另存为」**，写到用户自己选择的位置，应用目录不缓存任何副本 |
 | 不引入 | SQLite、系统 Keychain / Keystore（KEK 来自口令）、任何磁盘缓存 |

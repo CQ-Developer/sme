@@ -64,7 +64,7 @@ fn handshake_and_bidirectional_messages() {
         envelope,
     });
     assert!(actions.iter().any(
-        |action| matches!(action, Action::Received { plaintext, .. } if plaintext == b"hello bob")
+        |action| matches!(action, Action::Received { plaintext, .. } if plaintext.as_slice() == b"hello bob")
     ));
     assert_eq!(bob.buffer().len(), 1);
 
@@ -79,7 +79,7 @@ fn handshake_and_bidirectional_messages() {
         envelope,
     });
     assert!(actions.iter().any(
-        |action| matches!(action, Action::Received { plaintext, .. } if plaintext == b"hi alice")
+        |action| matches!(action, Action::Received { plaintext, .. } if plaintext.as_slice() == b"hi alice")
     ));
     assert_eq!(alice.buffer().len(), 1);
 }
@@ -136,10 +136,10 @@ fn buffer_drops_the_oldest_messages() {
     }
 
     assert_eq!(bob.buffer().len(), MESSAGE_BUFFER_LIMIT);
-    assert_eq!(bob.buffer().oldest().unwrap().plaintext, b"m5".to_vec());
+    assert_eq!(bob.buffer().oldest().unwrap().plaintext(), b"m5");
     assert_eq!(
-        bob.buffer().newest().unwrap().plaintext,
-        format!("m{}", MESSAGE_BUFFER_LIMIT + 4).as_bytes().to_vec()
+        bob.buffer().newest().unwrap().plaintext(),
+        format!("m{}", MESSAGE_BUFFER_LIMIT + 4).as_bytes()
     );
 }
 
@@ -148,6 +148,27 @@ fn sending_without_a_session_fails() {
     let (mut alice, _bob, _alice_id, bob_id) = client_pair();
     let error = alice.send_text(bob_id, b"too early").unwrap_err();
     assert!(matches!(error, CoreError::NoSession(peer) if peer == bob_id));
+}
+
+#[test]
+fn wipe_clears_messages_and_sessions() {
+    let (mut alice, mut bob, alice_id, bob_id) = client_pair();
+    establish(&mut alice, &mut bob, bob_id);
+
+    let Frame::Send(envelope) = first_send(alice.send_text(bob_id, b"wipe me").unwrap()) else {
+        panic!("expected Send");
+    };
+    bob.handle_frame(Frame::Deliver {
+        msg_id: "1".to_string(),
+        envelope,
+    });
+    assert_eq!(bob.buffer().len(), 1);
+
+    bob.wipe();
+    assert!(bob.buffer().is_empty());
+    assert!(
+        matches!(bob.send_text(alice_id, b"again").unwrap_err(), CoreError::NoSession(peer) if peer == alice_id)
+    );
 }
 
 #[test]

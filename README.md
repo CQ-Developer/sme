@@ -32,3 +32,10 @@ DATABASE_URL=postgres://sme:sme@127.0.0.1:5433/sme cargo test --workspace
 cp .env.example .env            # 填 SME_HMAC_KEY 与 POSTGRES_PASSWORD
 docker compose up -d postgres valkey caddy
 ```
+
+参考客户端（TUI，仅文本）：
+
+```bash
+cargo run -p sme-client-tui -- ws://127.0.0.1:8080/ws
+# Enter 登录 / /peer <账号> 选对端 / Ctrl+X 紧急擦除并删除本地数据
+```

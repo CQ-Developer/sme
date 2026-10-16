@@ -13,6 +13,7 @@
 > - v0.9：M2 起步——`sme-proto` 线路协议落地（账号 ID base32、控制帧 + Olm 信封、postcard 严格编解码）；查询方案选 A（D25），workspace MSRV 提到 1.94（sqlx 0.9 要求）。
 > - v0.10：M2 完成——axum 网关（注册 / 挑战-签名登录 / 预密钥 / 密文转发 / 离线队列 / D-ack）、客户端核心状态机（Olm 握手、加解密、内存缓冲、持久化信号）与 WebSocket 传输；端到端测试覆盖离线队列与跨重启棘轮恢复。
 > - v0.11：M3 完成——队列 / 预密钥 / 挑战 / presence / 限流全部进入 Valkey（D17 HMAC 键名、Stream TTL 24h、D-ack 原子删）；网关无状态；启动自检 I7；新增 I1/I5/I7/I8 不变式测试。
+> - v0.12：M4 完成——ratatui 参考客户端（仅文本：`/peer` 选对端、Ctrl+X 紧急擦除、空闲锁定）；消息缓冲与会话全链路 `Zeroize`；I4（应用目录金丝雀扫描）与 I6（类型级 zeroize 契约 + wipe 语义）测试；新增 `LocalConfig`。
 
 ## 1. 产品定位（一句话）
 
@@ -282,7 +283,7 @@ Cargo workspace（Rust）
 
 ### 10.2 待定
 
-无待定项。M3 已完成（v0.11），下一步 M4。
+无待定项。M4 已完成（v0.12），下一步 M5。
 
 ## 11. 持久化策略（D11 / D13）
 
@@ -368,8 +369,9 @@ D2 修订后，会话状态可跨启动恢复，移动端进程被杀不再意�
 3. M1 ✅（v0.8）：Olm 账号/会话跨重启恢复（`sme-client-store::save_account` / `load_account` / `save_session` / `load_sessions`，走 vodozemac 公开 pickle API），Argon2id KAT（含 p>1 向量）。
 4. M2 ✅（v0.10）：`sme-proto` 线路协议；axum 网关（注册 / 挑战-签名登录 / 预密钥 / 密文转发 / 内存队列 / D-ack / 单会话顶替）；`sme-client-core` 状态机与 `sme-client-net` WebSocket 传输；端到端测试覆盖离线队列与跨重启恢复。
 5. M3 ✅（v0.11）：Valkey 无状态网关（Stream TTL 24h、D-ack 原子删、D17 HMAC 键名、预密钥 7d、presence 心跳、限流、大消息信号量）；启动自检 I7；I1/I5/I7/I8 不变式测试（含真实 Valkey 重启验证）。
-6. 下一步进 M4：TUI 参考客户端（仅文本）+ 零消息落盘加固（`zeroize`、紧急擦除、syscall 断言），补齐 I2/I3/I4/I6/I11 的 Linux/macOS/Windows 验证。
-7. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
+6. M4 ✅（v0.12）：ratatui 参考客户端（仅文本；`/peer` 切换对端、Ctrl+X 紧急擦除、空闲 5 分钟锁定）；明文缓冲与会话 `Zeroize`；I4 应用目录金丝雀扫描与 I6 类型契约测试；`LocalConfig` 保存账号 ID / 盐 / KDF 参数。
+7. 下一步进 M5：uniffi + iOS/Android 外壳 + `sme-media` 图片链路（压缩 / 剥 EXIF / 解压炸弹防御）+ 平台防快照加固，补齐 I12。
+8. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
 
 ## 14. 附录：D4e 验证记录与本地环境
 

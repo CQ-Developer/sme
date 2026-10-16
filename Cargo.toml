@@ -11,10 +11,12 @@ rust-version = "1.94"
 argon2 = { version = "0.5", features = ["std"] }
 axum = { version = "0.8", features = ["ws"] }
 chacha20poly1305 = "0.10"
+crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
 getrandom = "0.3"
 hmac = "0.12"
 postcard = { version = "1", features = ["alloc"] }
+ratatui = "0.30"
 redis = { version = "1.7", default-features = false, features = [
     "tokio-comp",
     "connection-manager",

@@ -43,6 +43,11 @@ impl<T> MessageBuffer<T> {
         self.items.is_empty()
     }
 
+    /// 清空缓冲；每条消息在 drop 时被 `zeroize`（I6）。
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
     /// 按到达顺序遍历（旧 → 新）。
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.items.iter()
@@ -100,5 +105,15 @@ mod tests {
         assert!(buffer.is_empty());
         assert_eq!(buffer.oldest(), None);
         assert_eq!(buffer.newest(), None);
+    }
+
+    #[test]
+    fn clear_empties_the_buffer() {
+        let mut buffer = MessageBuffer::new();
+        buffer.push(1u8);
+        buffer.push(2u8);
+        buffer.clear();
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.oldest(), None);
     }
 }

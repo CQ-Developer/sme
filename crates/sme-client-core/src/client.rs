@@ -15,6 +15,7 @@ use vodozemac::Curve25519PublicKey;
 use vodozemac::olm::{
     Account, Message as OlmNormalMessage, OlmMessage, PreKeyMessage, Session, SessionConfig,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::MessageBuffer;
 
@@ -22,8 +23,22 @@ use crate::MessageBuffer;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedMessage {
     pub from: AccountId,
-    pub plaintext: Vec<u8>,
+    pub plaintext: Zeroizing<Vec<u8>>,
 }
+
+impl ReceivedMessage {
+    pub fn plaintext(&self) -> &[u8] {
+        &self.plaintext
+    }
+}
+
+impl Drop for ReceivedMessage {
+    fn drop(&mut self) {
+        self.plaintext.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for ReceivedMessage {}
 
 /// 交给调用方执行的动作。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +49,7 @@ pub enum Action {
     Received {
         msg_id: String,
         from: AccountId,
-        plaintext: Vec<u8>,
+        plaintext: Zeroizing<Vec<u8>>,
     },
     /// 解密失败（如重复投递）；已回 D-ack，不显示。
     DecryptFailed {
@@ -115,6 +130,11 @@ impl Client {
             sessions: BTreeMap::new(),
             buffer: MessageBuffer::new(),
         }
+    }
+
+    /// 首次注册：生成随机身份（D14）。
+    pub fn generate(account_id: AccountId) -> Self {
+        Self::new(account_id, Account::new())
     }
 
     /// 从 keystore 恢复身份与会话（M1 的持久化格式）。
@@ -217,6 +237,12 @@ impl Client {
         Ok(vec![Action::Send(Frame::Send(envelope)), Action::Persist])
     }
 
+    /// 紧急擦除：清空明文缓冲与会话（vodozemac 的密钥类型在 drop 时自行擦除）。
+    pub fn wipe(&mut self) {
+        self.buffer.clear();
+        self.sessions.clear();
+    }
+
     /// 处理一帧服务端消息；返回调用方需要执行的动作。
     pub fn handle_frame(&mut self, frame: Frame) -> Vec<Action> {
         match frame {
@@ -266,6 +292,7 @@ impl Client {
         let from = envelope.from;
         match self.decrypt(&envelope) {
             Ok((plaintext, session_changed)) => {
+                let plaintext = Zeroizing::new(plaintext);
                 self.buffer.push(ReceivedMessage {
                     from,
                     plaintext: plaintext.clone(),
