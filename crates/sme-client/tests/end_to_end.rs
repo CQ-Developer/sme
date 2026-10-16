@@ -1,4 +1,4 @@
-//! M2/M4 end-to-end test through the TUI [`Session`] layer: real gateway plus two clients.
+//! End-to-end test through the [`Session`] layer: real gateway plus two clients.
 //!
 //! Asserts register/login, prekey handshake, bidirectional messaging, offline queue, D-ack and restart recovery,
 //! plus **I4**: no plaintext message may appear anywhere in the app directory.
@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use sme_client_tui::session::{Event, ReceivedKind, Session};
+use sme_client::{Event, ReceivedKind, Session};
 use sme_server::valkey::{Valkey, random_instance_id};
 use sme_server::{app, state::AppState};
 use sme_test_support::{TestDir, ValkeyContainer};

@@ -1,4 +1,6 @@
-//! Headless client session: connect, register/login, send/receive, persist and wipe.
+//! Headless client runtime shared by the TUI and the mobile shells: it wires
+//! `sme-client-net` (transport), `sme-client-core` (Olm state machine) and
+//! `sme-client-store` (keystore) into one session with a small event API.
 //!
 //! Runtime shared by the TUI (and future desktop/mobile shells): it wires
 //! `sme-client-net` (transport), `sme-client-core` (Olm state machine) and
@@ -77,7 +79,7 @@ pub enum ReceivedKind {
     Image {
         width: u32,
         height: u32,
-        bytes: usize,
+        bytes: Vec<u8>,
     },
 }
 
@@ -305,7 +307,7 @@ fn to_event(action: Action) -> Event {
                 } => ReceivedKind::Image {
                     width,
                     height,
-                    bytes: bytes.len(),
+                    bytes,
                 },
             },
         },

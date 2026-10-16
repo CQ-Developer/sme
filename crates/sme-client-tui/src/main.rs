@@ -21,7 +21,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use sme_client_tui::session::{Event, ReceivedKind, Session};
+use sme_client::{Event, ReceivedKind, Session};
 use sme_proto::AccountId;
 use zeroize::Zeroizing;
 
@@ -174,9 +174,7 @@ async fn connect(app: &mut App) {
         Ok(mut session) => {
             app.status = format!("Logged in as {}", session.account_id());
             // Also upload a batch of one-time prekeys so peers can start a handshake.
-            let _ = session
-                .upload_prekeys(sme_client_tui::session::PREKEY_BATCH)
-                .await;
+            let _ = session.upload_prekeys(sme_client::PREKEY_BATCH).await;
             app.session = Some(session);
         }
         Err(error) => app.status = format!("Connection failed: {error}"),
@@ -231,7 +229,7 @@ fn apply_event(app: &mut App, event: Event) {
             } => push_message(
                 app,
                 from.to_string(),
-                format!("[image {width}x{height}, {bytes} bytes]"),
+                format!("[image {width}x{height}, {} bytes]", bytes.len()),
             ),
         },
         Event::DecryptFailed { from } => {

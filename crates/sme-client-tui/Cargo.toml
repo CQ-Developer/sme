@@ -8,16 +8,7 @@ rust-version.workspace = true
 crossterm = { workspace = true }
 futures-util = { workspace = true }
 ratatui = { workspace = true }
-sme-client-core = { path = "../sme-client-core" }
-sme-client-net = { path = "../sme-client-net" }
-sme-client-store = { path = "../sme-client-store" }
+sme-client = { path = "../sme-client" }
 sme-proto = { path = "../sme-proto" }
 tokio = { workspace = true }
 zeroize = { workspace = true }
-
-[dev-dependencies]
-axum = { workspace = true }
-sme-server = { path = "../sme-server" }
-sme-test-support = { path = "../sme-test-support" }
-sqlx = { workspace = true }
-vodozemac = { workspace = true }

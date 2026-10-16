@@ -45,3 +45,5 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      - name: ffi bindings
+        run: bash scripts/ci/gen-bindings.sh

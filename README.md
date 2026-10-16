@@ -39,3 +39,9 @@ docker compose up -d postgres valkey caddy
 cargo run -p sme-client-tui -- ws://127.0.0.1:8080/ws
 # Enter 登录 / /peer <账号> 选对端 / Ctrl+X 紧急擦除并删除本地数据
 ```
+
+移动端绑定（需要 Xcode / Android 工具链才能编译，生成不需要）：
+
+```bash
+bash scripts/ci/gen-bindings.sh            # 输出到 target/bindings/{swift,kotlin}
+```

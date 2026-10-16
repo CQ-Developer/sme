@@ -1,0 +1,18 @@
+[package]
+name = "sme-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sme-client-core = { path = "../sme-client-core" }
+sme-client-net = { path = "../sme-client-net" }
+sme-client-store = { path = "../sme-client-store" }
+sme-proto = { path = "../sme-proto" }
+
+[dev-dependencies]
+axum = { workspace = true }
+sme-server = { path = "../sme-server" }
+sme-test-support = { path = "../sme-test-support" }
+sqlx = { workspace = true }
+tokio = { workspace = true }

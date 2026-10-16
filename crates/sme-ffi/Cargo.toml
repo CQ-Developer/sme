@@ -3,3 +3,21 @@ name = "sme-ffi"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+sme-client = { path = "../sme-client" }
+sme-media = { path = "../sme-media" }
+sme-proto = { path = "../sme-proto" }
+tokio = { workspace = true }
+uniffi = { version = "0.32.2", features = ["tokio"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]

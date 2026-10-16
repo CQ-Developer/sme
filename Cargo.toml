@@ -44,6 +44,7 @@ tokio = { version = "1", features = [
     "macros",
     "net",
     "signal",
+    "sync",
     "time",
     "process",
     "io-util",

@@ -115,7 +115,8 @@ Cargo workspace（Rust）
     sme-client-core/   会话管理、Olm 会话持有、重放窗口、10 条内存环形缓冲
     sme-client-store/  本地 keystore：加解密并读写密钥材料与用户信息（唯一允许写盘的客户端 crate）
     sme-client-net/    WebSocket 传输、重连、心跳（唯一允许网络的客户端 crate）
-    sme-ffi/           uniffi 绑定层：导出给 Swift / Kotlin
+    sme-client/        无 UI 会话运行时：拼装 net + core + store，供 TUI 与移动端共用
+    sme-ffi/           uniffi 绑定层：导出 `sme-client` 给 Swift / Kotlin
     sme-client-tui/    桌面三平台参考客户端（Windows/macOS/Linux，ratatui，文本 + 图片预览/另存为）
     sme-server/        axum 网关：认证、在线状态、共享队列访问、限流
   apps/
