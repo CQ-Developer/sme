@@ -36,6 +36,19 @@ pub const MAX_KEY_ID_LEN: usize = 64;
 /// `Frame::Error::detail` 长度上限。
 pub const MAX_ERROR_DETAIL_LEN: usize = 512;
 
+/// 登录签名的规范化载荷：域名分隔 + 账号 ID + 挑战 nonce。
+///
+/// 客户端与网关必须用同一份字节做签名/校验，避免跨账号重放。
+pub fn login_payload(account_id: &AccountId, nonce: &[u8; 32]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(LOGIN_DOMAIN.len() + 16 + 32);
+    payload.extend_from_slice(LOGIN_DOMAIN);
+    payload.extend_from_slice(account_id.as_bytes());
+    payload.extend_from_slice(nonce);
+    payload
+}
+
+const LOGIN_DOMAIN: &[u8] = b"sme-login-v1";
+
 /// 编解码错误。
 #[derive(Debug)]
 pub enum ProtoError {
@@ -66,5 +79,23 @@ impl std::error::Error for ProtoError {
             Self::Encode(error) | Self::Decode(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_payload_binds_account_and_nonce() {
+        let account = AccountId::random();
+        let other = AccountId::random();
+        let nonce = [7u8; 32];
+
+        let payload = login_payload(&account, &nonce);
+        assert!(payload.starts_with(b"sme-login-v1"));
+        assert_eq!(payload.len(), 12 + 16 + 32);
+        assert_ne!(payload, login_payload(&other, &nonce));
+        assert_ne!(payload, login_payload(&account, &[8u8; 32]));
     }
 }

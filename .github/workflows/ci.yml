@@ -18,6 +18,22 @@ jobs:
   test:
     name: cargo test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.6-alpine
+        env:
+          POSTGRES_USER: sme
+          POSTGRES_PASSWORD: sme
+          POSTGRES_DB: sme
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sme -d sme"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://sme:sme@localhost:5432/sme
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

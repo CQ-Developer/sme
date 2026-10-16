@@ -3,3 +3,16 @@ name = "sme-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+futures-util = { workspace = true }
+getrandom = { workspace = true }
+serde_json = { workspace = true }
+sme-proto = { path = "../sme-proto" }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+vodozemac = { workspace = true }
+
+[dev-dependencies]
+tokio-tungstenite = { workspace = true }

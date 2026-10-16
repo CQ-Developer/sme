@@ -1,7 +1,23 @@
-//! axum 网关（D4c）：认证、在线状态、共享易失队列访问与限流。
-//!
-//! M0 只有骨架；启动自检（I7，拒绝带持久化的 Valkey）与真实逻辑在 M2/M3 落地。
+//! sme 网关入口：读环境变量、连 Postgres、跑迁移、监听端口。
 
-fn main() {
-    println!("sme server skeleton (M0): gateway 在 M2/M3 落地");
+use sqlx::postgres::PgPoolOptions;
+use tokio::net::TcpListener;
+
+use sme_server::{app, config::Config, state::AppState};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let config = Config::from_env().map_err(|error| format!("配置错误: {error}"))?;
+
+    let pool = PgPoolOptions::new()
+        .max_connections(16)
+        .connect(&config.database_url)
+        .await?;
+    sqlx::migrate!("../../migrations").run(&pool).await?;
+
+    let listener = TcpListener::bind(config.bind).await?;
+    println!("sme-server listening on ws://{}", config.bind);
+
+    axum::serve(listener, app(AppState::new(pool))).await?;
+    Ok(())
 }

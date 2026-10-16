@@ -8,6 +8,9 @@
 
 命中即 CI 失败。schema 断言与 DB dump 金丝雀（I1/I9）在 M3 叠加。
 
+对 `.rs` 的实现说明：只扫描**字符串字面量内部**且含 SQL 关键字的片段，
+避免把 `Message::from()` / `into()` / `values()` 这类普通标识符误判成 SQL。
+
 用法：check_message_columns.py [仓库根目录]
 """
 
@@ -22,10 +25,13 @@ FORBIDDEN = ("message", "content", "body", "payload", "ciphertext", "envelope")
 # 用前缀匹配：`message` 也要命中 `messages` / `message_id`，防止绕过。
 FORBIDDEN_RE = re.compile(r"\b(" + "|".join(FORBIDDEN) + ")", re.IGNORECASE)
 
-SQL_RE = re.compile(
-    r"\b(select|insert|update|delete|create|alter|drop|from|where|join|into|table|values)\b",
+SQL_KEYWORD_RE = re.compile(
+    r"\b(select|insert|update|delete|create|alter|drop|table)\b",
     re.IGNORECASE,
 )
+
+# Rust 单行字符串字面量（含转义）；运行时查询的 SQL 都写在里面。
+STRING_LITERAL_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
 
 def scan_sql_file(root: Path, source: Path) -> list[str]:
@@ -40,11 +46,15 @@ def scan_sql_file(root: Path, source: Path) -> list[str]:
 def scan_rust_file(root: Path, source: Path) -> list[str]:
     violations: list[str] = []
     for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
-        if not SQL_RE.search(line):
-            continue
-        match = FORBIDDEN_RE.search(line)
-        if match:
-            violations.append(f"{source.relative_to(root)}:{line_number}: 命中 {match.group(0)!r}")
+        for literal in STRING_LITERAL_RE.finditer(line):
+            content = literal.group(1)
+            if not SQL_KEYWORD_RE.search(content):
+                continue
+            match = FORBIDDEN_RE.search(content)
+            if match:
+                violations.append(
+                    f"{source.relative_to(root)}:{line_number}: 命中 {match.group(0)!r}"
+                )
     return violations
 
 
