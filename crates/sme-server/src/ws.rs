@@ -399,6 +399,34 @@ async fn handle_frame(
             }
         }
 
+        Frame::FetchIdentity { account_id } => {
+            if account.is_none() {
+                send_error(tx, ErrorCode::NotAuthenticated, "login required").await;
+                return;
+            }
+
+            match db::load_account(&state.db, account_id).await {
+                Ok(Some(stored)) => {
+                    send_frame(
+                        tx,
+                        Frame::IdentityKeys {
+                            account_id,
+                            ed25519_pub: stored.ed25519_pub,
+                            curve25519_pub: stored.curve25519_pub,
+                        },
+                    )
+                    .await;
+                }
+                Ok(None) => {
+                    send_error(tx, ErrorCode::UnknownAccount, "unknown account").await;
+                }
+                Err(error) => {
+                    eprintln!("identity lookup failed: {error}");
+                    send_error(tx, ErrorCode::Internal, "database error").await;
+                }
+            }
+        }
+
         Frame::Send(envelope) => {
             let Some(sender) = *account else {
                 send_error(tx, ErrorCode::NotAuthenticated, "login required").await;
@@ -499,6 +527,7 @@ async fn handle_frame(
         | Frame::LoginAck { .. }
         | Frame::UploadPreKeysAck { .. }
         | Frame::PreKeyBundle(_)
+        | Frame::IdentityKeys { .. }
         | Frame::Deliver { .. }
         | Frame::SendAck { .. } => {
             send_error(tx, ErrorCode::BadFrame, "unexpected frame from client").await;

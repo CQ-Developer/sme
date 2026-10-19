@@ -279,3 +279,84 @@ async fn a_new_login_kicks_the_previous_connection() {
         other => panic!("expected SessionReplaced, got {other:?}"),
     }
 }
+
+/// TOFU directory lookup: identity keys are public data and must not consume one-time prekeys.
+#[tokio::test]
+async fn identity_lookup_returns_registered_keys_without_consuming_prekeys() {
+    let Some((url, _valkey)) = test_server().await else {
+        eprintln!("skipping server integration test: DATABASE_URL is not set");
+        return;
+    };
+
+    let account_id = AccountId::random();
+    let mut account = Account::new();
+    let identity = account.identity_keys();
+
+    let mut socket = connect(&url).await;
+    register(&mut socket, account_id, &account).await;
+    login(&mut socket, account_id, &account).await;
+
+    account.generate_one_time_keys(1);
+    let (key_id, one_time_key) = account
+        .one_time_keys()
+        .into_iter()
+        .next()
+        .expect("one-time key");
+    let key_id = key_id.to_base64();
+    send_frame(
+        &mut socket,
+        &Frame::UploadPreKeys {
+            prekeys: vec![PreKeyUpload {
+                key_id: key_id.clone(),
+                public_key: *one_time_key.as_bytes(),
+            }],
+        },
+    )
+    .await;
+    match recv_frame(&mut socket).await {
+        Frame::UploadPreKeysAck { stored } => assert_eq!(stored, 1),
+        other => panic!("expected UploadPreKeysAck, got {other:?}"),
+    }
+    account.mark_keys_as_published();
+
+    for _ in 0..2 {
+        send_frame(&mut socket, &Frame::FetchIdentity { account_id }).await;
+        match recv_frame(&mut socket).await {
+            Frame::IdentityKeys {
+                account_id: returned,
+                ed25519_pub,
+                curve25519_pub,
+            } => {
+                assert_eq!(returned, account_id);
+                assert_eq!(&ed25519_pub, identity.ed25519.as_bytes());
+                assert_eq!(&curve25519_pub, identity.curve25519.as_bytes());
+            }
+            other => panic!("expected IdentityKeys, got {other:?}"),
+        }
+    }
+
+    // The prekey is still there: identity lookups must not touch Valkey prekey state.
+    send_frame(&mut socket, &Frame::FetchPreKey { account_id }).await;
+    match recv_frame(&mut socket).await {
+        Frame::PreKeyBundle(bundle) => {
+            assert_eq!(bundle.one_time_key_id, key_id);
+            assert_eq!(bundle.one_time_key, *one_time_key.as_bytes());
+        }
+        other => panic!("expected PreKeyBundle, got {other:?}"),
+    }
+
+    send_frame(
+        &mut socket,
+        &Frame::FetchIdentity {
+            account_id: AccountId::random(),
+        },
+    )
+    .await;
+    match recv_frame(&mut socket).await {
+        Frame::Error {
+            code: ErrorCode::UnknownAccount,
+            ..
+        } => {}
+        other => panic!("expected UnknownAccount, got {other:?}"),
+    }
+}

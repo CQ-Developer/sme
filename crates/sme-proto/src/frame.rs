@@ -177,6 +177,17 @@ pub enum Frame {
         code: ErrorCode,
         detail: String,
     },
+
+    /// Directory lookup for TOFU pinning; does not consume a one-time prekey.
+    FetchIdentity {
+        account_id: AccountId,
+    },
+    /// Registered identity keys of an account (public directory data, not authenticated by the server).
+    IdentityKeys {
+        account_id: AccountId,
+        ed25519_pub: [u8; 32],
+        curve25519_pub: [u8; 32],
+    },
 }
 
 impl Frame {
