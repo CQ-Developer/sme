@@ -92,8 +92,11 @@ fn save_image_with_roots(
         return Err(SaveError::AlreadyExists(canonical_target));
     }
 
+    // Write through the canonical path, but report the path the user asked for:
+    // canonicalize() turns `/var` into `/private/var` on macOS and `C:\` into
+    // `\\?\C:\` on Windows, which is noise in the status line.
     write_new_file(&canonical_target, bytes)?;
-    Ok(canonical_target)
+    Ok(target)
 }
 
 fn absolute_target(input: &str) -> Result<PathBuf, SaveError> {
