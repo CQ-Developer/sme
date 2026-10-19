@@ -6,15 +6,15 @@
 //! `sme-client-net` (transport), `sme-client-core` (Olm state machine) and
 //! `sme-client-store` (keystore) into one runtime that exposes [`Event`] and a few operations to the UI.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 
-use sme_client_core::{Action, Client, CoreError, MessageBuffer, ReceivedMessage};
+use sme_client_core::{Action, Client, MessageBuffer, ReceivedMessage};
 use sme_client_net::{NetError, Transport};
 use sme_client_store::{Keystore, LocalConfig, StoreError};
 use sme_proto::{AccountId, ErrorCode, MessageBody};
 
-pub use sme_client_core::{ATTACHMENT_BYTES_LIMIT, MESSAGE_BUFFER_LIMIT};
+pub use sme_client_core::{ATTACHMENT_BYTES_LIMIT, CoreError, MESSAGE_BUFFER_LIMIT, PeerPin};
 
 /// Number of one-time prekeys per upload.
 pub const PREKEY_BATCH: usize = 5;
@@ -115,6 +115,22 @@ pub enum Event {
     ProtocolError {
         detail: &'static str,
     },
+    /// First contact: the peer's identity keys were pinned (TOFU).
+    PeerPinned {
+        peer: AccountId,
+        pin: PeerPin,
+    },
+    /// The peer presented different identity keys; the stored pin was not changed.
+    PeerKeyChanged {
+        peer: AccountId,
+        pinned: PeerPin,
+        /// `None` when only the inbound pre-key Curve25519 key was observed.
+        observed: Option<PeerPin>,
+    },
+    /// The peer's keys match the stored pin again.
+    PeerKeyConfirmed {
+        peer: AccountId,
+    },
 }
 
 /// A logged-in client session.
@@ -141,7 +157,8 @@ impl Session {
                     .load_account()?
                     .ok_or(SessionError::MissingAccount)?;
                 let sessions = keystore.load_sessions()?;
-                let client = Client::restore(config.account_id, account, sessions);
+                let pins = load_peer_pins(&keystore)?;
+                let client = Client::restore(config.account_id, account, sessions, pins);
                 (config, client, keystore)
             }
             None => {
@@ -268,6 +285,11 @@ impl Session {
         Ok(())
     }
 
+    /// TOFU pin for a peer, if first contact has already happened.
+    pub fn peer_pin(&self, peer: AccountId) -> Option<PeerPin> {
+        self.client.peer_pin(peer).copied()
+    }
+
     /// Emergency memory wipe: plaintext buffer, sessions and pending events.
     pub fn wipe_memory(&mut self) {
         self.client.wipe();
@@ -304,9 +326,33 @@ impl Session {
         for (peer, session) in self.client.sessions() {
             self.keystore.save_session(peer, session)?;
         }
+        for (peer, pin) in self.client.peer_pins() {
+            self.keystore
+                .put(format!("peer.pin.{peer}"), pin.to_bytes().to_vec());
+        }
         self.keystore.save()?;
         Ok(())
     }
+}
+
+const PEER_PIN_PREFIX: &str = "peer.pin.";
+
+/// Load TOFU pins from the keystore; a malformed record is an error, not a silent reset.
+fn load_peer_pins(keystore: &Keystore) -> Result<BTreeMap<AccountId, PeerPin>, SessionError> {
+    let mut pins = BTreeMap::new();
+    for (key, value) in keystore.entries_with_prefix(PEER_PIN_PREFIX) {
+        let account = key
+            .strip_prefix(PEER_PIN_PREFIX)
+            .and_then(|id| id.parse::<AccountId>().ok())
+            .ok_or(SessionError::Store(StoreError::Corrupt(
+                "bad peer pin account id",
+            )))?;
+        let pin = PeerPin::from_bytes(value).ok_or(SessionError::Store(StoreError::Corrupt(
+            "bad peer pin value",
+        )))?;
+        pins.insert(account, pin);
+    }
+    Ok(pins)
 }
 
 fn to_event(action: Action) -> Event {
@@ -340,8 +386,82 @@ fn to_event(action: Action) -> Event {
         Action::DecryptFailed { from, .. } => Event::DecryptFailed { from },
         Action::ServerError { code, detail } => Event::ServerError { code, detail },
         Action::ProtocolError { detail } => Event::ProtocolError { detail },
+        Action::PeerPinned { peer, pin } => Event::PeerPinned { peer, pin },
+        Action::PeerKeyChanged {
+            peer,
+            pinned,
+            observed,
+        } => Event::PeerKeyChanged {
+            peer,
+            pinned,
+            observed,
+        },
+        Action::PeerKeyConfirmed { peer } => Event::PeerKeyConfirmed { peer },
         Action::Send(_) | Action::Persist => {
             unreachable!("Send/Persist are handled in run_actions")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sme-client-pins-{}-{}-{name}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn peer_pins_roundtrip_through_the_keystore() {
+        let dir = scratch("roundtrip");
+        let path = dir.join("keystore.bin");
+        let password = b"test passphrase";
+
+        let peer = AccountId::random();
+        let pin = PeerPin {
+            ed25519_pub: [0xAB; 32],
+            curve25519_pub: [0xCD; 32],
+        };
+        {
+            let mut keystore = Keystore::create(&path, password).expect("create keystore");
+            keystore.put("olm.account", b"unrelated".to_vec());
+            keystore.put(format!("peer.pin.{peer}"), pin.to_bytes().to_vec());
+            keystore.save().expect("save keystore");
+        }
+
+        let keystore = Keystore::open(&path, password).expect("reopen keystore");
+        let pins = load_peer_pins(&keystore).expect("load pins");
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins.get(&peer), Some(&pin));
+
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn malformed_pin_records_are_rejected_instead_of_reset() {
+        let dir = scratch("malformed");
+        let path = dir.join("keystore.bin");
+        let password = b"test passphrase";
+
+        let mut keystore = Keystore::create(&path, password).expect("create keystore");
+        keystore.put("peer.pin.not-an-account", vec![0u8; 64]);
+        keystore.save().expect("save keystore");
+
+        let keystore = Keystore::open(&path, password).expect("reopen keystore");
+        assert!(matches!(
+            load_peer_pins(&keystore),
+            Err(SessionError::Store(StoreError::Corrupt(_)))
+        ));
+
+        std::fs::remove_dir_all(dir).expect("cleanup");
     }
 }

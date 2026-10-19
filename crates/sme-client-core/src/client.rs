@@ -5,7 +5,7 @@
 //! - On `Action::Persist` the caller writes `account()` / `sessions()` into the keystore;
 //! - The rest are events for the UI.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sme_proto::{
     AccountId, Envelope, ErrorCode, Frame, KdfParams, MessageBody, OlmMessageKind,
@@ -51,6 +51,31 @@ impl Drop for ReceivedMessage {
 
 impl ZeroizeOnDrop for ReceivedMessage {}
 
+/// Long-term identity keys pinned on first contact (TOFU, D6/I10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerPin {
+    pub ed25519_pub: [u8; 32],
+    pub curve25519_pub: [u8; 32],
+}
+
+impl PeerPin {
+    /// Flat keystore representation: Ed25519 || Curve25519.
+    pub fn to_bytes(self) -> [u8; 64] {
+        let mut bytes = [0u8; 64];
+        bytes[..32].copy_from_slice(&self.ed25519_pub);
+        bytes[32..].copy_from_slice(&self.curve25519_pub);
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let bytes: [u8; 64] = bytes.try_into().ok()?;
+        Some(Self {
+            ed25519_pub: bytes[..32].try_into().ok()?,
+            curve25519_pub: bytes[32..].try_into().ok()?,
+        })
+    }
+}
+
 /// An action for the caller to perform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -72,6 +97,23 @@ pub enum Action {
     /// A frame we cannot receive or understand; recorded only, without affecting the connection.
     ProtocolError {
         detail: &'static str,
+    },
+    /// First contact: the peer's identity keys were pinned; the caller must persist.
+    PeerPinned {
+        peer: AccountId,
+        pin: PeerPin,
+    },
+    /// A peer presented identity keys that differ from the stored pin. The pin was **not**
+    /// changed; sending to this peer is blocked until the user re-verifies it.
+    PeerKeyChanged {
+        peer: AccountId,
+        pinned: PeerPin,
+        /// `None` when only the Curve25519 half was observed (inbound pre-key message).
+        observed: Option<PeerPin>,
+    },
+    /// The peer's keys match the stored pin again (for example after a transient server error).
+    PeerKeyConfirmed {
+        peer: AccountId,
     },
     Registered,
     /// One-time prekeys were uploaded (`stored` is the total kept server-side).
@@ -103,6 +145,7 @@ pub enum CoreError {
     SessionCreation(vodozemac::olm::SessionCreationError),
     Encryption(vodozemac::olm::EncryptionError),
     Decryption(vodozemac::olm::DecryptionError),
+    PeerKeyChanged(AccountId),
 }
 
 impl std::fmt::Display for CoreError {
@@ -114,6 +157,10 @@ impl std::fmt::Display for CoreError {
             Self::SessionCreation(error) => write!(f, "olm session creation failed: {error}"),
             Self::Encryption(error) => write!(f, "olm encryption failed: {error}"),
             Self::Decryption(error) => write!(f, "olm decryption failed: {error}"),
+            Self::PeerKeyChanged(peer) => write!(
+                f,
+                "identity of {peer} changed; verify the safety code before sending"
+            ),
         }
     }
 }
@@ -135,6 +182,12 @@ pub struct Client {
     account: Account,
     sessions: BTreeMap<AccountId, Session>,
     buffer: MessageBuffer<ReceivedMessage>,
+    /// TOFU pins, loaded from the keystore and never overwritten automatically.
+    pins: BTreeMap<AccountId, PeerPin>,
+    /// Peers whose identity changed; sends are refused until the pin is re-verified.
+    blocked: BTreeSet<AccountId>,
+    /// In-flight identity directory lookups, to avoid one request per queued message.
+    requested_identities: BTreeSet<AccountId>,
 }
 
 impl Client {
@@ -144,6 +197,9 @@ impl Client {
             account,
             sessions: BTreeMap::new(),
             buffer: MessageBuffer::new(),
+            pins: BTreeMap::new(),
+            blocked: BTreeSet::new(),
+            requested_identities: BTreeSet::new(),
         }
     }
 
@@ -152,17 +208,21 @@ impl Client {
         Self::new(account_id, Account::new())
     }
 
-    /// Restore identity and sessions from the keystore (the M1 persistence format).
+    /// Restore identity, sessions and TOFU pins from the keystore (the M1 persistence format).
     pub fn restore(
         account_id: AccountId,
         account: Account,
         sessions: impl IntoIterator<Item = (AccountId, Session)>,
+        pins: impl IntoIterator<Item = (AccountId, PeerPin)>,
     ) -> Self {
         Self {
             account_id,
             account,
             sessions: sessions.into_iter().collect(),
             buffer: MessageBuffer::new(),
+            pins: pins.into_iter().collect(),
+            blocked: BTreeSet::new(),
+            requested_identities: BTreeSet::new(),
         }
     }
 
@@ -177,6 +237,20 @@ impl Client {
     /// Established sessions with their peers, for the caller to persist.
     pub fn sessions(&self) -> impl Iterator<Item = (AccountId, &Session)> {
         self.sessions.iter().map(|(peer, session)| (*peer, session))
+    }
+
+    /// TOFU pins, for the caller to persist.
+    pub fn peer_pins(&self) -> impl Iterator<Item = (AccountId, &PeerPin)> {
+        self.pins.iter().map(|(peer, pin)| (*peer, pin))
+    }
+
+    pub fn peer_pin(&self, peer: AccountId) -> Option<&PeerPin> {
+        self.pins.get(&peer)
+    }
+
+    /// True after [`Action::PeerKeyChanged`] until the pin matches again or the client is restarted.
+    pub fn is_peer_blocked(&self, peer: AccountId) -> bool {
+        self.blocked.contains(&peer)
     }
 
     pub fn buffer(&self) -> &MessageBuffer<ReceivedMessage> {
@@ -237,6 +311,9 @@ impl Client {
         peer: AccountId,
         body: &MessageBody,
     ) -> Result<Vec<Action>, CoreError> {
+        if self.blocked.contains(&peer) {
+            return Err(CoreError::PeerKeyChanged(peer));
+        }
         let plaintext = body.encode().map_err(|_| CoreError::BadBody)?;
         let session = self
             .sessions
@@ -287,32 +364,145 @@ impl Client {
             Frame::SendAck { msg_id } => vec![Action::Sent { msg_id }],
 
             Frame::PreKeyBundle(bundle) => {
+                let peer = bundle.account_id;
+                let observed = PeerPin {
+                    ed25519_pub: bundle.ed25519_pub,
+                    curve25519_pub: bundle.curve25519_pub,
+                };
+                let mut actions = self.observe_identity(peer, observed);
+                if actions
+                    .iter()
+                    .any(|action| matches!(action, Action::PeerKeyChanged { .. }))
+                {
+                    return actions;
+                }
+                self.requested_identities.remove(&peer);
+
                 match self.account.create_outbound_session(
                     SessionConfig::default(),
                     Curve25519PublicKey::from_bytes(bundle.curve25519_pub),
                     Curve25519PublicKey::from_bytes(bundle.one_time_key),
                 ) {
                     Ok(session) => {
-                        let peer = bundle.account_id;
                         self.sessions.insert(peer, session);
-                        vec![Action::SessionEstablished { peer }, Action::Persist]
+                        actions.push(Action::SessionEstablished { peer });
+                        if !actions
+                            .iter()
+                            .any(|action| matches!(action, Action::Persist))
+                        {
+                            actions.push(Action::Persist);
+                        }
+                        actions
                     }
-                    Err(_) => vec![Action::ProtocolError {
-                        detail: "failed to create outbound session",
-                    }],
+                    Err(_) => {
+                        actions.push(Action::ProtocolError {
+                            detail: "failed to create outbound session",
+                        });
+                        actions
+                    }
                 }
+            }
+
+            Frame::IdentityKeys {
+                account_id,
+                ed25519_pub,
+                curve25519_pub,
+            } => {
+                self.requested_identities.remove(&account_id);
+                self.observe_identity(
+                    account_id,
+                    PeerPin {
+                        ed25519_pub,
+                        curve25519_pub,
+                    },
+                )
             }
 
             Frame::Deliver { msg_id, envelope } => self.handle_deliver(msg_id, envelope),
 
-            Frame::Error { code, detail } => vec![Action::ServerError { code, detail }],
+            Frame::Error { code, detail } => {
+                // A failed lookup should not suppress retries for every peer.
+                self.requested_identities.clear();
+                vec![Action::ServerError { code, detail }]
+            }
 
             _ => vec![],
         }
     }
 
+    /// Compare observed keys with the stored pin; never overwrite a pin on a mismatch.
+    fn observe_identity(&mut self, peer: AccountId, observed: PeerPin) -> Vec<Action> {
+        match self.pins.get(&peer).copied() {
+            None => {
+                self.pins.insert(peer, observed);
+                self.blocked.remove(&peer);
+                vec![
+                    Action::PeerPinned {
+                        peer,
+                        pin: observed,
+                    },
+                    Action::Persist,
+                ]
+            }
+            Some(pinned) if pinned != observed => {
+                self.blocked.insert(peer);
+                vec![Action::PeerKeyChanged {
+                    peer,
+                    pinned,
+                    observed: Some(observed),
+                }]
+            }
+            Some(_) => {
+                if self.blocked.remove(&peer) {
+                    vec![Action::PeerKeyConfirmed { peer }]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    /// Detect an identity change in an inbound pre-key message and request the peer's
+    /// directory entry on first contact (the pre-key message carries Curve25519 only).
+    fn observe_inbound_identity(&mut self, from: AccountId, envelope: &Envelope) -> Vec<Action> {
+        if envelope.kind != OlmMessageKind::PreKey {
+            return Vec::new();
+        }
+        let Ok(pre_key) = PreKeyMessage::from_bytes(&envelope.payload) else {
+            return Vec::new();
+        };
+        let observed_curve25519 = *pre_key.identity_key().as_bytes();
+
+        if let Some(pinned) = self.pins.get(&from).copied()
+            && pinned.curve25519_pub != observed_curve25519
+        {
+            self.blocked.insert(from);
+            return vec![Action::PeerKeyChanged {
+                peer: from,
+                pinned,
+                observed: None,
+            }];
+        }
+
+        if self.requested_identities.insert(from) {
+            vec![Action::Send(Frame::FetchIdentity { account_id: from })]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn handle_deliver(&mut self, msg_id: String, envelope: Envelope) -> Vec<Action> {
         let from = envelope.from;
+        let mut identity_actions = self.observe_inbound_identity(from, &envelope);
+        if identity_actions
+            .iter()
+            .any(|action| matches!(action, Action::PeerKeyChanged { .. }))
+        {
+            // Do not display a message whose pre-key identity does not match the pin.
+            identity_actions.push(Action::Send(Frame::DeliverAck { msg_id }));
+            return identity_actions;
+        }
+
         match self.decrypt(&envelope) {
             Ok((body, session_changed)) => {
                 let dropped_images = self.buffer.push_received(ReceivedMessage {
@@ -320,28 +510,29 @@ impl Client {
                     body: body.clone(),
                 });
 
-                let mut actions = vec![
-                    Action::Received {
-                        msg_id: msg_id.clone(),
-                        from,
-                        body,
-                        dropped_images,
-                    },
-                    Action::Send(Frame::DeliverAck { msg_id }),
-                ];
+                let mut actions = identity_actions;
+                actions.push(Action::Received {
+                    msg_id: msg_id.clone(),
+                    from,
+                    body,
+                    dropped_images,
+                });
+                actions.push(Action::Send(Frame::DeliverAck { msg_id }));
                 if session_changed {
                     actions.push(Action::Persist);
                 }
                 actions
             }
-            Err(_) => vec![
-                Action::DecryptFailed {
+            Err(_) => {
+                let mut actions = identity_actions;
+                actions.push(Action::DecryptFailed {
                     msg_id: msg_id.clone(),
                     from,
-                },
+                });
                 // Duplicate delivery consumed the message key: still D-ack, or the server keeps redelivering
-                Action::Send(Frame::DeliverAck { msg_id }),
-            ],
+                actions.push(Action::Send(Frame::DeliverAck { msg_id }));
+                actions
+            }
         }
     }
 

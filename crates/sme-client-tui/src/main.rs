@@ -27,7 +27,7 @@ use ratatui_image::StatefulImage;
 use ratatui_image::picker::Picker;
 use ratatui_image::thread::{ResizeRequest, ResizeResponse, ThreadProtocol};
 use sme_client::{ATTACHMENT_BYTES_LIMIT, MESSAGE_BUFFER_LIMIT};
-use sme_client::{Event, ReceivedKind, Session};
+use sme_client::{Event, PeerPin, ReceivedKind, Session};
 use sme_proto::{AccountId, MessageBody};
 use zeroize::Zeroizing;
 
@@ -64,6 +64,8 @@ struct App {
     save_prompt: Option<Zeroizing<String>>,
     /// Bytes captured when the save prompt opened; dropped (and zeroized) on cancel.
     save_target: Option<Zeroizing<Vec<u8>>>,
+    /// Set after a TOFU pin mismatch; sends to this peer are refused until it is confirmed again.
+    blocked_peer: Option<AccountId>,
 }
 
 #[tokio::main]
@@ -109,6 +111,7 @@ async fn run(
         image: None,
         save_prompt: None,
         save_target: None,
+        blocked_peer: None,
     };
 
     let mut keys = EventStream::new();
@@ -273,6 +276,7 @@ fn clear_plaintext(app: &mut App) {
     app.image = None;
     app.save_prompt = None;
     app.save_target = None;
+    app.blocked_peer = None;
 }
 
 /// Network loss drops the session (and its plaintext) but keeps the peer selection.
@@ -282,6 +286,7 @@ fn disconnect(app: &mut App, reason: &str) {
     app.image = None;
     app.save_prompt = None;
     app.save_target = None;
+    // Keep `blocked_peer`: an identity alarm must survive a transient disconnect.
     app.status = format!("{reason}; enter the passphrase and press Enter to reconnect");
 }
 
@@ -325,7 +330,19 @@ async fn send_input(app: &mut App) {
                     app.status = format!("Failed to fetch prekey: {error}");
                     return;
                 }
-                app.status = format!("Peer set to {peer} (prekey requested)");
+                app.status = match app
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.peer_pin(peer))
+                {
+                    Some(pin) => format!(
+                        "Peer set to {peer} (TOFU identity pinned, unverified: {})",
+                        fingerprint(&pin)
+                    ),
+                    None => format!(
+                        "Peer set to {peer} (prekey requested; identity will be pinned on first contact)"
+                    ),
+                };
             }
             Err(_) => app.status = "Invalid account ID (26 base32 characters)".to_string(),
         }
@@ -336,6 +353,12 @@ async fn send_input(app: &mut App) {
         app.status = "Pick a peer first with /peer <account-id>".to_string();
         return;
     };
+    if app.blocked_peer == Some(peer) {
+        app.status = format!(
+            "Sending to {peer} is blocked: its identity key changed. Restart to retry with the stored pin."
+        );
+        return;
+    }
     let Some(session) = app.session.as_mut() else {
         return;
     };
@@ -446,7 +469,65 @@ fn apply_event(app: &mut App, event: Event) {
             app.status = format!("Session established with {peer}")
         }
         Event::ProtocolError { detail } => app.status = format!("Protocol error: {detail}"),
+        Event::PeerPinned { peer, pin } => {
+            push_notice(
+                app,
+                format!(
+                    "TOFU identity pinned for {peer}: {} (unverified; safety code verification is not implemented yet)",
+                    fingerprint(&pin)
+                ),
+            );
+            app.status = format!("Pinned identity for {peer}; verify the safety code out of band");
+        }
+        Event::PeerKeyChanged {
+            peer,
+            pinned,
+            observed,
+        } => {
+            app.blocked_peer = Some(peer);
+            let detail = match observed {
+                Some(observed) => format!(
+                    "pinned {} / observed {}",
+                    fingerprint(&pinned),
+                    fingerprint(&observed)
+                ),
+                None => format!(
+                    "pinned {} / an inbound pre-key used a different Curve25519 key",
+                    fingerprint(&pinned)
+                ),
+            };
+            push_notice(
+                app,
+                format!(
+                    "WARNING: identity key changed for {peer}; sending is blocked. {detail}. Verify the safety code before continuing."
+                ),
+            );
+            app.status =
+                format!("Identity changed for {peer}; sending blocked until the pin is verified");
+        }
+        Event::PeerKeyConfirmed { peer } => {
+            if app.blocked_peer == Some(peer) {
+                app.blocked_peer = None;
+            }
+            push_notice(
+                app,
+                format!("Identity for {peer} matches the stored pin again"),
+            );
+            app.status = format!("Identity for {peer} confirmed against the stored pin");
+        }
     }
+}
+
+/// Short display fingerprint; the full safety code is part of the SAS step.
+fn fingerprint(pin: &PeerPin) -> String {
+    fn short(bytes: &[u8]) -> String {
+        bytes
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+    format!("{}:{}", short(&pin.ed25519_pub), short(&pin.curve25519_pub))
 }
 
 fn show_image(app: &mut App, bytes: &[u8], width: u32, height: u32) {
@@ -521,6 +602,14 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         .split(frame.area());
 
     let mut lines: Vec<Line> = Vec::new();
+    if let Some(peer) = app.blocked_peer {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "WARNING: identity changed for {peer}; sending is blocked. Verify the safety code before continuing."
+            ),
+            Style::default().fg(Color::Red),
+        )));
+    }
     if app.dropped > 0 {
         lines.push(Line::from(Span::styled(
             format!(
@@ -685,6 +774,7 @@ mod draw_tests {
             image: Some(image),
             save_prompt: Some(Zeroizing::new("/home/user/photo.jpg".to_string())),
             save_target: None,
+            blocked_peer: None,
         }
     }
 
@@ -693,6 +783,9 @@ mod draw_tests {
         for (width, height) in [(80, 24), (40, 12), (20, 8)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             let mut app = app_with_preview();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+            app.blocked_peer = Some(AccountId::random());
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         }
     }

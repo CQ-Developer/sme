@@ -276,3 +276,77 @@ async fn image_payload_stays_in_memory() {
     // I4: neither keystore nor local config may contain the image bytes.
     assert_no_plaintext(dir.path(), canary);
 }
+
+/// I10 end-to-end: the TOFU pin survives a restart and a directory key change is reported.
+#[tokio::test]
+async fn tofu_pin_survives_restart_and_detects_a_directory_key_change() {
+    let Some((url, _valkey)) = start_server().await else {
+        eprintln!("skipping end-to-end test: DATABASE_URL is not set");
+        return;
+    };
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+
+    let dir = TestDir::new("tofu");
+    let alice_path = dir.join("alice.bin");
+    let bob_path = dir.join("bob.bin");
+
+    let mut alice = Session::connect(&url, &alice_path, PASSWORD)
+        .await
+        .expect("alice connects");
+    let mut bob = Session::connect(&url, &bob_path, PASSWORD)
+        .await
+        .expect("bob connects");
+    let bob_id = bob.account_id();
+
+    bob.upload_prekeys(5).await.unwrap();
+    next_until(&mut bob, |event| {
+        matches!(event, Event::PreKeysUploaded { .. })
+    })
+    .await;
+    alice.fetch_prekey(bob_id).await.unwrap();
+    next_until(&mut alice, |event| {
+        matches!(event, Event::SessionEstablished { .. })
+    })
+    .await;
+    let pin = alice.peer_pin(bob_id).expect("first contact pins the peer");
+
+    // Restart Alice: the pin must be restored from the encrypted keystore.
+    drop(alice);
+    let mut alice = Session::connect(&url, &alice_path, PASSWORD)
+        .await
+        .expect("alice restarts");
+    assert_eq!(alice.peer_pin(bob_id), Some(pin));
+
+    // Simulate a server-side identity replacement after first contact.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect test database");
+    sqlx::query("UPDATE accounts SET ed25519_pub = $1, curve25519_pub = $2 WHERE account_id = $3")
+        .bind(vec![0x42u8; 32])
+        .bind(vec![0x24u8; 32])
+        .bind(bob_id.to_base32())
+        .execute(&pool)
+        .await
+        .expect("replace identity keys");
+    pool.close().await;
+
+    alice.fetch_prekey(bob_id).await.unwrap();
+    let event = next_until(&mut alice, |event| {
+        matches!(event, Event::PeerKeyChanged { .. })
+    })
+    .await;
+    assert!(matches!(event, Event::PeerKeyChanged { peer, .. } if peer == bob_id));
+
+    let error = alice.send_text(bob_id, "must not send").await.unwrap_err();
+    assert!(matches!(
+        error,
+        sme_client::SessionError::Core(sme_client::CoreError::PeerKeyChanged(peer)) if peer == bob_id
+    ));
+    assert_eq!(
+        alice.peer_pin(bob_id),
+        Some(pin),
+        "the stored pin must not be overwritten"
+    );
+}

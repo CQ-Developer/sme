@@ -158,6 +158,17 @@ impl Keystore {
         self.entries.get(key).map(Vec::as_slice)
     }
 
+    /// Iterate entries whose names start with `prefix` (used for `peer.pin.<id>` records).
+    pub fn entries_with_prefix<'a>(
+        &'a self,
+        prefix: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a [u8])> + 'a {
+        self.entries
+            .iter()
+            .filter(move |(key, _)| key.starts_with(prefix))
+            .map(|(key, value)| (key.as_str(), value.as_slice()))
+    }
+
     pub fn remove(&mut self, key: &str) -> Option<Vec<u8>> {
         self.entries.remove(key)
     }

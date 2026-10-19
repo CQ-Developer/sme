@@ -13,6 +13,7 @@
 
 uniffi::setup_scaffolding!("sme");
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -124,6 +125,29 @@ pub enum ClientEvent {
     ProtocolError {
         detail: String,
     },
+    PeerPinned {
+        peer: String,
+        ed25519: String,
+        curve25519: String,
+    },
+    PeerKeyChanged {
+        peer: String,
+        pinned_ed25519: String,
+        pinned_curve25519: String,
+        observed_ed25519: Option<String>,
+        observed_curve25519: Option<String>,
+    },
+    PeerKeyConfirmed {
+        peer: String,
+    },
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }
 
 fn to_ffi_event(event: Event) -> ClientEvent {
@@ -164,6 +188,25 @@ fn to_ffi_event(event: Event) -> ClientEvent {
         },
         Event::ProtocolError { detail } => ClientEvent::ProtocolError {
             detail: detail.to_string(),
+        },
+        Event::PeerPinned { peer, pin } => ClientEvent::PeerPinned {
+            peer: peer.to_base32(),
+            ed25519: hex(&pin.ed25519_pub),
+            curve25519: hex(&pin.curve25519_pub),
+        },
+        Event::PeerKeyChanged {
+            peer,
+            pinned,
+            observed,
+        } => ClientEvent::PeerKeyChanged {
+            peer: peer.to_base32(),
+            pinned_ed25519: hex(&pinned.ed25519_pub),
+            pinned_curve25519: hex(&pinned.curve25519_pub),
+            observed_ed25519: observed.as_ref().map(|pin| hex(&pin.ed25519_pub)),
+            observed_curve25519: observed.as_ref().map(|pin| hex(&pin.curve25519_pub)),
+        },
+        Event::PeerKeyConfirmed { peer } => ClientEvent::PeerKeyConfirmed {
+            peer: peer.to_base32(),
         },
     }
 }

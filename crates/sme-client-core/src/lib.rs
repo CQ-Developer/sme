@@ -9,7 +9,7 @@ mod client;
 
 use std::collections::VecDeque;
 
-pub use client::{Action, Client, CoreError, ReceivedMessage};
+pub use client::{Action, Client, CoreError, PeerPin, ReceivedMessage};
 
 /// Maximum number of plaintext messages kept in memory (plan.md §8).
 pub const MESSAGE_BUFFER_LIMIT: usize = 10;
