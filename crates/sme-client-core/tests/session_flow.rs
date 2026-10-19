@@ -2,7 +2,7 @@
 //!
 //! No IO at all (I2 gate); server interaction is covered by `sme-server` integration tests.
 
-use sme_client_core::{Action, Client, CoreError, MESSAGE_BUFFER_LIMIT};
+use sme_client_core::{ATTACHMENT_BYTES_LIMIT, Action, Client, CoreError, MESSAGE_BUFFER_LIMIT};
 use sme_proto::{AccountId, Frame, MessageBody, OlmMessageKind, PreKeyBundle};
 use vodozemac::olm::Account;
 
@@ -144,6 +144,43 @@ fn buffer_drops_the_oldest_messages() {
         bob.buffer().newest().unwrap().text(),
         Some(format!("m{}", MESSAGE_BUFFER_LIMIT + 4).as_str())
     );
+}
+
+#[test]
+fn attachment_budget_is_enforced_and_reported() {
+    const IMAGE_BYTES: usize = sme_proto::MAX_IMAGE_BYTES;
+    let (mut alice, mut bob, _alice_id, bob_id) = client_pair();
+    establish(&mut alice, &mut bob, bob_id);
+
+    let image = MessageBody::Image {
+        width: 8,
+        height: 8,
+        bytes: vec![0x5A; IMAGE_BYTES],
+    };
+    for index in 0..9 {
+        let Frame::Send(envelope) = first_send(alice.send_body(bob_id, &image).unwrap()) else {
+            panic!("expected Send");
+        };
+        let actions = bob.handle_frame(Frame::Deliver {
+            msg_id: index.to_string(),
+            envelope,
+        });
+        let dropped = actions
+            .iter()
+            .find_map(|action| match action {
+                Action::Received { dropped_images, .. } => Some(*dropped_images),
+                _ => None,
+            })
+            .expect("expected Received");
+        assert_eq!(
+            dropped,
+            usize::from(index == 8),
+            "only the ninth image exceeds the 8 MiB budget"
+        );
+    }
+
+    assert_eq!(bob.buffer().len(), 8);
+    assert!(bob.buffer().image_bytes() <= ATTACHMENT_BYTES_LIMIT);
 }
 
 #[test]

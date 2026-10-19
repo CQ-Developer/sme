@@ -100,13 +100,30 @@ pub enum MessageKind {
 pub enum ClientEvent {
     Registered,
     Ready,
-    PreKeysUploaded { stored: u16 },
-    SessionEstablished { peer: String },
-    Sent { msg_id: String },
-    Received { from: String, kind: MessageKind },
-    DecryptFailed { from: String },
-    ServerError { code: String, detail: String },
-    ProtocolError { detail: String },
+    PreKeysUploaded {
+        stored: u16,
+    },
+    SessionEstablished {
+        peer: String,
+    },
+    Sent {
+        msg_id: String,
+    },
+    Received {
+        from: String,
+        kind: MessageKind,
+        dropped_images: u32,
+    },
+    DecryptFailed {
+        from: String,
+    },
+    ServerError {
+        code: String,
+        detail: String,
+    },
+    ProtocolError {
+        detail: String,
+    },
 }
 
 fn to_ffi_event(event: Event) -> ClientEvent {
@@ -118,8 +135,13 @@ fn to_ffi_event(event: Event) -> ClientEvent {
             peer: peer.to_base32(),
         },
         Event::Sent { msg_id } => ClientEvent::Sent { msg_id },
-        Event::Received { from, kind } => ClientEvent::Received {
+        Event::Received {
+            from,
+            kind,
+            dropped_images,
+        } => ClientEvent::Received {
             from: from.to_base32(),
+            dropped_images: u32::try_from(dropped_images).unwrap_or(u32::MAX),
             kind: match kind {
                 ReceivedKind::Text(text) => MessageKind::Text { text },
                 ReceivedKind::Image {

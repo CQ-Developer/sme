@@ -14,6 +14,8 @@ use sme_client_net::{NetError, Transport};
 use sme_client_store::{Keystore, LocalConfig, StoreError};
 use sme_proto::{AccountId, ErrorCode, MessageBody};
 
+pub use sme_client_core::{ATTACHMENT_BYTES_LIMIT, MESSAGE_BUFFER_LIMIT};
+
 /// Number of one-time prekeys per upload.
 pub const PREKEY_BATCH: usize = 5;
 
@@ -88,13 +90,31 @@ pub enum ReceivedKind {
 pub enum Event {
     Registered,
     Ready,
-    PreKeysUploaded { stored: u16 },
-    SessionEstablished { peer: AccountId },
-    Sent { msg_id: String },
-    Received { from: AccountId, kind: ReceivedKind },
-    DecryptFailed { from: AccountId },
-    ServerError { code: ErrorCode, detail: String },
-    ProtocolError { detail: &'static str },
+    PreKeysUploaded {
+        stored: u16,
+    },
+    SessionEstablished {
+        peer: AccountId,
+    },
+    Sent {
+        msg_id: String,
+    },
+    Received {
+        from: AccountId,
+        kind: ReceivedKind,
+        /// Images dropped from the plaintext buffer by the 8 MiB attachment budget.
+        dropped_images: usize,
+    },
+    DecryptFailed {
+        from: AccountId,
+    },
+    ServerError {
+        code: ErrorCode,
+        detail: String,
+    },
+    ProtocolError {
+        detail: &'static str,
+    },
 }
 
 /// A logged-in client session.
@@ -296,8 +316,14 @@ fn to_event(action: Action) -> Event {
         Action::PreKeysUploaded { stored } => Event::PreKeysUploaded { stored },
         Action::SessionEstablished { peer } => Event::SessionEstablished { peer },
         Action::Sent { msg_id } => Event::Sent { msg_id },
-        Action::Received { from, body, .. } => Event::Received {
+        Action::Received {
             from,
+            body,
+            dropped_images,
+            ..
+        } => Event::Received {
+            from,
+            dropped_images,
             kind: match body {
                 MessageBody::Text { text } => ReceivedKind::Text(text),
                 MessageBody::Image {

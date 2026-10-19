@@ -61,6 +61,8 @@ pub enum Action {
         msg_id: String,
         from: AccountId,
         body: MessageBody,
+        /// Images evicted from the buffer to satisfy [`crate::ATTACHMENT_BYTES_LIMIT`].
+        dropped_images: usize,
     },
     /// Decryption failed (e.g. duplicate delivery); D-acked but not shown.
     DecryptFailed {
@@ -313,7 +315,7 @@ impl Client {
         let from = envelope.from;
         match self.decrypt(&envelope) {
             Ok((body, session_changed)) => {
-                self.buffer.push(ReceivedMessage {
+                let dropped_images = self.buffer.push_received(ReceivedMessage {
                     from,
                     body: body.clone(),
                 });
@@ -323,6 +325,7 @@ impl Client {
                         msg_id: msg_id.clone(),
                         from,
                         body,
+                        dropped_images,
                     },
                     Action::Send(Frame::DeliverAck { msg_id }),
                 ];

@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use sme_client::{Event, ReceivedKind, Session};
+use sme_proto::MessageBody;
 use sme_server::valkey::{Valkey, random_instance_id};
 use sme_server::{app, state::AppState};
 use sme_test_support::{TestDir, ValkeyContainer};
@@ -204,4 +205,74 @@ async fn emergency_wipe_deletes_local_state() {
 
     assert!(!path.exists());
     assert!(!config_path.exists());
+}
+
+/// I4 for images: a received JPEG payload stays in memory and never reaches the app directory.
+#[tokio::test]
+async fn image_payload_stays_in_memory() {
+    let Some((url, _valkey)) = start_server().await else {
+        eprintln!("skipping end-to-end test: DATABASE_URL is not set");
+        return;
+    };
+
+    let dir = TestDir::new("e2e-image");
+    let alice_path = dir.join("alice.bin");
+    let bob_path = dir.join("bob.bin");
+
+    let mut alice = Session::connect(&url, &alice_path, PASSWORD)
+        .await
+        .expect("alice connects");
+    let mut bob = Session::connect(&url, &bob_path, PASSWORD)
+        .await
+        .expect("bob connects");
+    let bob_id = bob.account_id();
+
+    bob.upload_prekeys(5).await.unwrap();
+    next_until(&mut bob, |event| {
+        matches!(event, Event::PreKeysUploaded { .. })
+    })
+    .await;
+    alice.fetch_prekey(bob_id).await.unwrap();
+    next_until(&mut alice, |event| {
+        matches!(event, Event::SessionEstablished { .. })
+    })
+    .await;
+
+    let canary = b"CANARY-image-3c9d: this JPEG payload must never reach disk";
+    let image = MessageBody::Image {
+        width: 2,
+        height: 2,
+        bytes: canary.to_vec(),
+    };
+    alice.send_body(bob_id, &image).await.unwrap();
+
+    let Event::Received {
+        kind:
+            ReceivedKind::Image {
+                width,
+                height,
+                bytes,
+            },
+        dropped_images,
+        ..
+    } = next_until(&mut bob, |event| {
+        matches!(
+            event,
+            Event::Received {
+                kind: ReceivedKind::Image { .. },
+                ..
+            }
+        )
+    })
+    .await
+    else {
+        panic!("expected an image message");
+    };
+
+    assert_eq!((width, height), (2, 2));
+    assert_eq!(bytes, canary);
+    assert_eq!(dropped_images, 0);
+
+    // I4: neither keystore nor local config may contain the image bytes.
+    assert_no_plaintext(dir.path(), canary);
 }
