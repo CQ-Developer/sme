@@ -1,7 +1,8 @@
 //! Client-side message body, serialized inside the Olm plaintext.
 //!
 //! The gateway never sees this: it only routes the encrypted envelope (I1/D11).
-//! v1 supports text (<= 16KB) and one JPEG image (<= 1MB, prepared by `sme-media`).
+//! v1 supports text (<= 16KB), one JPEG image (<= 1MB, prepared by `sme-media`) and opaque
+//! interactive SAS verification frames (D28). SAS frames never enter the chat buffer.
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,35 @@ pub const MAX_IMAGE_BYTES: usize = 1_000_000;
 /// Maximum image edge after client-side compression (plan.md §7).
 pub const MAX_IMAGE_DIMENSION: u32 = 2048;
 
+/// Maximum base64 MAC length in a SAS verification message.
+pub const MAX_SAS_MAC_LEN: usize = 128;
+
+/// Interactive SAS verification frames, carried inside the Olm plaintext (D28).
+///
+/// The gateway never sees these: they are part of [`MessageBody`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SasMessage {
+    /// Initiator's ephemeral Curve25519 public key.
+    Start { public_key: [u8; 32] },
+    /// Responder's ephemeral Curve25519 public key.
+    PublicKey { public_key: [u8; 32] },
+    /// MAC over both parties' identity keys, sent after the local user confirmed the code.
+    Mac { mac: String },
+    /// Abort the verification.
+    Cancel,
+}
+
+impl SasMessage {
+    fn validate(&self) -> Result<(), ProtoError> {
+        if let Self::Mac { mac } = self
+            && (mac.is_empty() || mac.len() > MAX_SAS_MAC_LEN)
+        {
+            return Err(ProtoError::InvalidFrame("bad SAS MAC length"));
+        }
+        Ok(())
+    }
+}
+
 /// Plaintext message body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageBody {
@@ -28,6 +58,8 @@ pub enum MessageBody {
         height: u32,
         bytes: Vec<u8>,
     },
+    /// Interactive SAS verification control frame; never buffered as a chat message.
+    Sas(SasMessage),
 }
 
 impl MessageBody {
@@ -61,6 +93,7 @@ impl MessageBody {
                     return Err(ProtoError::InvalidFrame("bad image dimensions"));
                 }
             }
+            Self::Sas(message) => message.validate()?,
         }
         Ok(())
     }
@@ -69,7 +102,7 @@ impl MessageBody {
     pub fn image_bytes_len(&self) -> Option<usize> {
         match self {
             Self::Image { bytes, .. } => Some(bytes.len()),
-            Self::Text { .. } => None,
+            Self::Text { .. } | Self::Sas(_) => None,
         }
     }
 
@@ -142,5 +175,20 @@ mod tests {
         let mut encoded = MessageBody::text("hi").unwrap().encode().unwrap();
         encoded.push(0);
         assert!(MessageBody::decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn sas_messages_roundtrip_and_validate_macs() {
+        let start = MessageBody::Sas(SasMessage::Start {
+            public_key: [7u8; 32],
+        });
+        let encoded = start.encode().unwrap();
+        assert_eq!(MessageBody::decode(&encoded).unwrap(), start);
+
+        let bad = MessageBody::Sas(SasMessage::Mac {
+            mac: "".to_string(),
+        });
+        assert!(bad.encode().is_err());
+        assert!(bad.validate().is_err());
     }
 }

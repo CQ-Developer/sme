@@ -10,7 +10,9 @@ mod codec;
 mod frame;
 
 pub use account_id::AccountId;
-pub use body::{MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION, MAX_TEXT_BYTES, MessageBody};
+pub use body::{
+    MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION, MAX_SAS_MAC_LEN, MAX_TEXT_BYTES, MessageBody, SasMessage,
+};
 pub use codec::{decode, decode_envelope, encode, encode_envelope};
 pub use frame::{
     Envelope, ErrorCode, Frame, KdfParams, OlmMessageKind, PreKeyBundle, PreKeyUpload,

@@ -9,12 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sme_proto::{
     AccountId, Envelope, ErrorCode, Frame, KdfParams, MessageBody, OlmMessageKind,
-    PROTOCOL_VERSION, PreKeyUpload, Registration, Signature, login_payload,
+    PROTOCOL_VERSION, PreKeyUpload, Registration, SasMessage, Signature, login_payload,
 };
 use vodozemac::Curve25519PublicKey;
 use vodozemac::olm::{
     Account, Message as OlmNormalMessage, OlmMessage, PreKeyMessage, Session, SessionConfig,
 };
+use vodozemac::sas::{EstablishedSas, Mac, Sas};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::MessageBuffer;
@@ -35,7 +36,7 @@ impl ReceivedMessage {
     pub fn text(&self) -> Option<&str> {
         match &self.body {
             MessageBody::Text { text } => Some(text),
-            MessageBody::Image { .. } => None,
+            MessageBody::Image { .. } | MessageBody::Sas(_) => None,
         }
     }
 }
@@ -45,6 +46,7 @@ impl Drop for ReceivedMessage {
         match &mut self.body {
             MessageBody::Text { text } => text.zeroize(),
             MessageBody::Image { bytes, .. } => bytes.zeroize(),
+            MessageBody::Sas(_) => {}
         }
     }
 }
@@ -74,6 +76,29 @@ impl PeerPin {
             curve25519_pub: bytes[32..].try_into().ok()?,
         })
     }
+}
+
+/// Domain separator for the emoji/decimal SAS code.
+const SAS_INFO: &str = "sme-sas-v1";
+/// Domain separator and context for the identity-key MAC exchange.
+const SAS_MAC_INFO: &str = "sme-sas-mac-v1";
+
+/// One interactive SAS verification at a time (plan.md D28).
+struct SasSession {
+    peer: AccountId,
+    state: SasState,
+}
+
+enum SasState {
+    /// We sent `Start` and wait for the peer's public key.
+    WaitingForPeer(Sas),
+    /// Both sides can compute the code; waiting for local confirmation and/or the peer's MAC.
+    AwaitingPeerConfirm {
+        established: EstablishedSas,
+        peer_confirmed: bool,
+    },
+    /// Local user confirmed and our MAC was sent; waiting for the peer's MAC.
+    AwaitingPeerMac { established: EstablishedSas },
 }
 
 /// An action for the caller to perform.
@@ -115,6 +140,35 @@ pub enum Action {
     PeerKeyConfirmed {
         peer: AccountId,
     },
+    /// A local SAS verification was started; waiting for the peer's ephemeral key.
+    SasStarted {
+        peer: AccountId,
+    },
+    /// Both SAS sides derived the code; show it and ask the user to compare it out of band.
+    SasCode {
+        peer: AccountId,
+        emojis: [u8; 7],
+        decimals: (u16, u16, u16),
+    },
+    /// The peer sent a valid MAC and confirmed the code; the local user still has to confirm.
+    SasPeerConfirmed {
+        peer: AccountId,
+    },
+    /// The local user confirmed; our MAC was sent and we wait for the peer's MAC.
+    SasLocalConfirmed {
+        peer: AccountId,
+    },
+    /// Both MACs verified; the peer's pin is now marked as verified.
+    SasVerified {
+        peer: AccountId,
+    },
+    /// A SAS MAC failed or the handshake was invalid; the pin stays unverified.
+    SasFailed {
+        peer: AccountId,
+    },
+    SasCancelled {
+        peer: AccountId,
+    },
     Registered,
     /// One-time prekeys were uploaded (`stored` is the total kept server-side).
     PreKeysUploaded {
@@ -146,6 +200,9 @@ pub enum CoreError {
     Encryption(vodozemac::olm::EncryptionError),
     Decryption(vodozemac::olm::DecryptionError),
     PeerKeyChanged(AccountId),
+    NoPin(AccountId),
+    SasInProgress,
+    SasNotReady,
 }
 
 impl std::fmt::Display for CoreError {
@@ -161,6 +218,12 @@ impl std::fmt::Display for CoreError {
                 f,
                 "identity of {peer} changed; verify the safety code before sending"
             ),
+            Self::NoPin(peer) => write!(
+                f,
+                "no pinned identity for {peer}; complete first contact first"
+            ),
+            Self::SasInProgress => write!(f, "a SAS verification is already in progress"),
+            Self::SasNotReady => write!(f, "SAS verification is not ready for this action"),
         }
     }
 }
@@ -188,6 +251,10 @@ pub struct Client {
     blocked: BTreeSet<AccountId>,
     /// In-flight identity directory lookups, to avoid one request per queued message.
     requested_identities: BTreeSet<AccountId>,
+    /// Peers whose current pin passed an interactive SAS verification.
+    verified: BTreeSet<AccountId>,
+    /// At most one SAS verification is in flight.
+    sas: Option<SasSession>,
 }
 
 impl Client {
@@ -200,6 +267,8 @@ impl Client {
             pins: BTreeMap::new(),
             blocked: BTreeSet::new(),
             requested_identities: BTreeSet::new(),
+            verified: BTreeSet::new(),
+            sas: None,
         }
     }
 
@@ -208,12 +277,13 @@ impl Client {
         Self::new(account_id, Account::new())
     }
 
-    /// Restore identity, sessions and TOFU pins from the keystore (the M1 persistence format).
+    /// Restore identity, sessions, TOFU pins and SAS verification state from the keystore.
     pub fn restore(
         account_id: AccountId,
         account: Account,
         sessions: impl IntoIterator<Item = (AccountId, Session)>,
         pins: impl IntoIterator<Item = (AccountId, PeerPin)>,
+        verified: impl IntoIterator<Item = AccountId>,
     ) -> Self {
         Self {
             account_id,
@@ -223,6 +293,8 @@ impl Client {
             pins: pins.into_iter().collect(),
             blocked: BTreeSet::new(),
             requested_identities: BTreeSet::new(),
+            verified: verified.into_iter().collect(),
+            sas: None,
         }
     }
 
@@ -251,6 +323,16 @@ impl Client {
     /// True after [`Action::PeerKeyChanged`] until the pin matches again or the client is restarted.
     pub fn is_peer_blocked(&self, peer: AccountId) -> bool {
         self.blocked.contains(&peer)
+    }
+
+    /// True when the current pin passed an interactive SAS verification.
+    pub fn is_peer_verified(&self, peer: AccountId) -> bool {
+        self.verified.contains(&peer)
+    }
+
+    /// Verified peers, for the caller to persist.
+    pub fn verified_peers(&self) -> impl Iterator<Item = AccountId> + '_ {
+        self.verified.iter().copied()
     }
 
     pub fn buffer(&self) -> &MessageBuffer<ReceivedMessage> {
@@ -298,14 +380,13 @@ impl Client {
         vec![Action::Send(Frame::FetchPreKey { account_id: peer })]
     }
 
-    /// Encrypt a text/byte message with the existing session.
     /// Encrypt a text message with the existing session.
     pub fn send_text(&mut self, peer: AccountId, text: &str) -> Result<Vec<Action>, CoreError> {
         let body = MessageBody::text(text).map_err(|_| CoreError::BadBody)?;
         self.send_body(peer, &body)
     }
 
-    /// Encrypt a message body (text or image) with the existing session.
+    /// Encrypt a message body (text, image or a SAS verification frame) with the existing session.
     pub fn send_body(
         &mut self,
         peer: AccountId,
@@ -337,10 +418,118 @@ impl Client {
         Ok(vec![Action::Send(Frame::Send(envelope)), Action::Persist])
     }
 
-    /// Emergency wipe: clear the plaintext buffer and sessions (vodozemac key types wipe themselves on drop).
+    /// Start an interactive SAS verification with a pinned peer (D28).
+    pub fn start_sas(&mut self, peer: AccountId) -> Result<Vec<Action>, CoreError> {
+        if self.sas.is_some() {
+            return Err(CoreError::SasInProgress);
+        }
+        if !self.pins.contains_key(&peer) {
+            return Err(CoreError::NoPin(peer));
+        }
+        if !self.sessions.contains_key(&peer) {
+            return Err(CoreError::NoSession(peer));
+        }
+
+        let sas = Sas::new();
+        let public_key = *sas.public_key().as_bytes();
+        let mut actions = self.send_sas_message(peer, SasMessage::Start { public_key })?;
+        self.sas = Some(SasSession {
+            peer,
+            state: SasState::WaitingForPeer(sas),
+        });
+        actions.insert(0, Action::SasStarted { peer });
+        Ok(actions)
+    }
+
+    /// Confirm the displayed code on this side and send the identity MAC.
+    pub fn confirm_sas(&mut self, peer: AccountId) -> Result<Vec<Action>, CoreError> {
+        let Some(session) = self.sas.take() else {
+            return Err(CoreError::SasNotReady);
+        };
+        if session.peer != peer {
+            self.sas = Some(session);
+            return Err(CoreError::SasNotReady);
+        }
+        let SasState::AwaitingPeerConfirm {
+            established,
+            peer_confirmed,
+        } = session.state
+        else {
+            self.sas = Some(session);
+            return Err(CoreError::SasNotReady);
+        };
+
+        let mac = match self.sas_mac(peer, &established) {
+            Ok(mac) => mac,
+            Err(error) => {
+                self.sas = Some(SasSession {
+                    peer,
+                    state: SasState::AwaitingPeerConfirm {
+                        established,
+                        peer_confirmed,
+                    },
+                });
+                return Err(error);
+            }
+        };
+
+        let mut actions = match self.send_sas_message(
+            peer,
+            SasMessage::Mac {
+                mac: mac.to_base64(),
+            },
+        ) {
+            Ok(actions) => actions,
+            Err(error) => {
+                self.sas = Some(SasSession {
+                    peer,
+                    state: SasState::AwaitingPeerConfirm {
+                        established,
+                        peer_confirmed,
+                    },
+                });
+                return Err(error);
+            }
+        };
+        actions.push(Action::SasLocalConfirmed { peer });
+
+        if peer_confirmed {
+            self.verified.insert(peer);
+            self.sas = None;
+            actions.push(Action::SasVerified { peer });
+            actions.push(Action::Persist);
+        } else {
+            self.sas = Some(SasSession {
+                peer,
+                state: SasState::AwaitingPeerMac { established },
+            });
+        }
+        Ok(actions)
+    }
+
+    /// Abort a SAS verification and tell the peer.
+    pub fn cancel_sas(&mut self, peer: AccountId) -> Vec<Action> {
+        if !self
+            .sas
+            .as_ref()
+            .is_some_and(|session| session.peer == peer)
+        {
+            return Vec::new();
+        }
+        self.sas = None;
+        let mut actions = self
+            .send_sas_message(peer, SasMessage::Cancel)
+            .unwrap_or_default();
+        actions.push(Action::SasCancelled { peer });
+        actions
+    }
+
+    /// Emergency wipe: clear the plaintext buffer, sessions and in-flight SAS state
+    /// (vodozemac key types wipe themselves on drop).
     pub fn wipe(&mut self) {
         self.buffer.clear();
         self.sessions.clear();
+        self.sas = None;
     }
 
     /// Handle one server frame; returns the actions the caller must perform.
@@ -430,6 +619,194 @@ impl Client {
         }
     }
 
+    fn send_sas_message(
+        &mut self,
+        peer: AccountId,
+        message: SasMessage,
+    ) -> Result<Vec<Action>, CoreError> {
+        self.send_body(peer, &MessageBody::Sas(message))
+    }
+
+    /// Handle one SAS verification frame decrypted from the peer.
+    fn handle_sas_message(&mut self, from: AccountId, message: SasMessage) -> Vec<Action> {
+        if !self.pins.contains_key(&from) {
+            // The peer started verification before we pinned it: fetch the directory
+            // identity and ignore this frame. The peer can retry after the pin arrives.
+            if self.requested_identities.insert(from) {
+                return vec![Action::Send(Frame::FetchIdentity { account_id: from })];
+            }
+            return Vec::new();
+        }
+
+        match message {
+            SasMessage::Start { public_key } => self.handle_sas_start(from, public_key),
+            SasMessage::PublicKey { public_key } => self.handle_sas_public_key(from, public_key),
+            SasMessage::Mac { mac } => self.handle_sas_mac(from, &mac),
+            SasMessage::Cancel => {
+                if self
+                    .sas
+                    .as_ref()
+                    .is_some_and(|session| session.peer == from)
+                {
+                    self.sas = None;
+                    vec![Action::SasCancelled { peer: from }]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    fn handle_sas_start(&mut self, from: AccountId, public_key: [u8; 32]) -> Vec<Action> {
+        // A simultaneous start reuses our own ephemeral key as the responder key.
+        let sas = match self.sas.take() {
+            None => Sas::new(),
+            Some(SasSession {
+                peer,
+                state: SasState::WaitingForPeer(sas),
+            }) if peer == from => sas,
+            Some(existing) => {
+                self.sas = Some(existing);
+                return Vec::new();
+            }
+        };
+
+        let our_public_key = *sas.public_key().as_bytes();
+        let Ok(established) = sas.diffie_hellman(Curve25519PublicKey::from_bytes(public_key))
+        else {
+            return vec![Action::SasFailed { peer: from }];
+        };
+        let mut actions = match self.send_sas_message(
+            from,
+            SasMessage::PublicKey {
+                public_key: our_public_key,
+            },
+        ) {
+            Ok(actions) => actions,
+            Err(_) => return vec![Action::SasFailed { peer: from }],
+        };
+        actions.push(sas_code(from, &established));
+        self.sas = Some(SasSession {
+            peer: from,
+            state: SasState::AwaitingPeerConfirm {
+                established,
+                peer_confirmed: false,
+            },
+        });
+        actions
+    }
+
+    fn handle_sas_public_key(&mut self, from: AccountId, public_key: [u8; 32]) -> Vec<Action> {
+        let Some(SasSession {
+            peer,
+            state: SasState::WaitingForPeer(sas),
+        }) = self.sas.take()
+        else {
+            return Vec::new();
+        };
+        if peer != from {
+            self.sas = Some(SasSession {
+                peer,
+                state: SasState::WaitingForPeer(sas),
+            });
+            return Vec::new();
+        }
+
+        let Ok(established) = sas.diffie_hellman(Curve25519PublicKey::from_bytes(public_key))
+        else {
+            return vec![Action::SasFailed { peer: from }];
+        };
+        let code = sas_code(from, &established);
+        self.sas = Some(SasSession {
+            peer: from,
+            state: SasState::AwaitingPeerConfirm {
+                established,
+                peer_confirmed: false,
+            },
+        });
+        vec![code]
+    }
+
+    fn handle_sas_mac(&mut self, from: AccountId, mac: &str) -> Vec<Action> {
+        let Some(session) = self.sas.take() else {
+            return Vec::new();
+        };
+        if session.peer != from {
+            self.sas = Some(session);
+            return Vec::new();
+        }
+
+        let input = match self.sas_mac_input(from) {
+            // Bind the MAC to the sender: a peer cannot reflect our own MAC back to us.
+            Ok(input) => format!("{from}:{input}"),
+            Err(_) => return vec![Action::SasFailed { peer: from }],
+        };
+        let Ok(peer_mac) = Mac::from_base64(mac) else {
+            return vec![Action::SasFailed { peer: from }];
+        };
+        let valid = match &session.state {
+            SasState::AwaitingPeerConfirm { established, .. }
+            | SasState::AwaitingPeerMac { established } => established
+                .verify_mac(&input, SAS_MAC_INFO, &peer_mac)
+                .is_ok(),
+            SasState::WaitingForPeer(_) => {
+                self.sas = Some(session);
+                return Vec::new();
+            }
+        };
+        if !valid {
+            return vec![Action::SasFailed { peer: from }];
+        }
+
+        match session.state {
+            SasState::AwaitingPeerConfirm { established, .. } => {
+                self.sas = Some(SasSession {
+                    peer: from,
+                    state: SasState::AwaitingPeerConfirm {
+                        established,
+                        peer_confirmed: true,
+                    },
+                });
+                vec![Action::SasPeerConfirmed { peer: from }]
+            }
+            SasState::AwaitingPeerMac { .. } => {
+                self.verified.insert(from);
+                vec![Action::SasVerified { peer: from }, Action::Persist]
+            }
+            SasState::WaitingForPeer(_) => unreachable!(),
+        }
+    }
+
+    fn sas_mac(&self, peer: AccountId, established: &EstablishedSas) -> Result<Mac, CoreError> {
+        // The sender-account prefix makes the two MACs directional (no reflection).
+        let input = format!("{}:{}", self.account_id, self.sas_mac_input(peer)?);
+        Ok(established.calculate_mac(&input, SAS_MAC_INFO))
+    }
+
+    /// Canonical MAC input binding both account IDs and both identity key pairs.
+    /// Sorting by account ID makes both sides compute the same string.
+    fn sas_mac_input(&self, peer: AccountId) -> Result<String, CoreError> {
+        let peer_pin = self.pins.get(&peer).ok_or(CoreError::NoPin(peer))?;
+        let own = self.account.identity_keys();
+        let mut parties = [
+            (
+                self.account_id,
+                *own.ed25519.as_bytes(),
+                *own.curve25519.as_bytes(),
+            ),
+            (peer, peer_pin.ed25519_pub, peer_pin.curve25519_pub),
+        ];
+        parties.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+
+        let mut bytes = Vec::with_capacity(2 * (16 + 32 + 32));
+        for (account, ed25519, curve25519) in parties {
+            bytes.extend_from_slice(account.as_bytes());
+            bytes.extend_from_slice(&ed25519);
+            bytes.extend_from_slice(&curve25519);
+        }
+        Ok(hex(&bytes))
+    }
+
     /// Compare observed keys with the stored pin; never overwrite a pin on a mismatch.
     fn observe_identity(&mut self, peer: AccountId, observed: PeerPin) -> Vec<Action> {
         match self.pins.get(&peer).copied() {
@@ -446,11 +823,23 @@ impl Client {
             }
             Some(pinned) if pinned != observed => {
                 self.blocked.insert(peer);
-                vec![Action::PeerKeyChanged {
+                if self
+                    .sas
+                    .as_ref()
+                    .is_some_and(|session| session.peer == peer)
+                {
+                    self.sas = None;
+                }
+                let mut actions = vec![Action::PeerKeyChanged {
                     peer,
                     pinned,
                     observed: Some(observed),
-                }]
+                }];
+                // A changed identity invalidates an earlier SAS verification.
+                if self.verified.remove(&peer) {
+                    actions.push(Action::Persist);
+                }
+                actions
             }
             Some(_) => {
                 if self.blocked.remove(&peer) {
@@ -477,6 +866,13 @@ impl Client {
             && pinned.curve25519_pub != observed_curve25519
         {
             self.blocked.insert(from);
+            if self
+                .sas
+                .as_ref()
+                .is_some_and(|session| session.peer == from)
+            {
+                self.sas = None;
+            }
             return vec![Action::PeerKeyChanged {
                 peer: from,
                 pinned,
@@ -505,18 +901,24 @@ impl Client {
 
         match self.decrypt(&envelope) {
             Ok((body, session_changed)) => {
-                let dropped_images = self.buffer.push_received(ReceivedMessage {
-                    from,
-                    body: body.clone(),
-                });
-
                 let mut actions = identity_actions;
-                actions.push(Action::Received {
-                    msg_id: msg_id.clone(),
-                    from,
-                    body,
-                    dropped_images,
-                });
+                match body {
+                    MessageBody::Sas(message) => {
+                        actions.extend(self.handle_sas_message(from, message));
+                    }
+                    body => {
+                        let dropped_images = self.buffer.push_received(ReceivedMessage {
+                            from,
+                            body: body.clone(),
+                        });
+                        actions.push(Action::Received {
+                            msg_id: msg_id.clone(),
+                            from,
+                            body,
+                            dropped_images,
+                        });
+                    }
+                }
                 actions.push(Action::Send(Frame::DeliverAck { msg_id }));
                 if session_changed {
                     actions.push(Action::Persist);
@@ -590,4 +992,25 @@ impl Client {
             }
         }
     }
+}
+
+/// Build the user-visible SAS code derived from the established shared secret.
+fn sas_code(peer: AccountId, established: &EstablishedSas) -> Action {
+    let code = established.bytes(SAS_INFO);
+    Action::SasCode {
+        peer,
+        emojis: code.emoji_indices(),
+        decimals: code.decimals(),
+    }
+}
+
+/// Lowercase hex, used for the canonical MAC input string.
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        text.push(DIGITS[(byte >> 4) as usize] as char);
+        text.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    text
 }
