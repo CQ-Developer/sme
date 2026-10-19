@@ -273,7 +273,7 @@ Cargo workspace（Rust）
 >
 > M7.1 状态（v0.19）：TOFU pin、身份变更告警、I10 与交互式 SAS（D28）全部完成；M7 剩余项为群聊、元数据保护、文件/视频。
 >
-> 验证补强（v0.20）：I9 自动化与终端审计工具/清单完成；真实 Kitty / iTerm2 / Sixel / tmux / ssh 的像素效果仍需按 `docs/AUDIT.md` 在对应终端手动记录。
+> 验证补强（v0.20）：I9 自动化与终端审计工具/清单完成；Windows Terminal 已探测到 `Sixel`（视觉 demo 待确认）；真实 Kitty / iTerm2 / tmux / ssh 的像素效果仍需按 `docs/AUDIT.md` 手动记录。
 
 ## 10. 决策记录
 
@@ -405,7 +405,7 @@ D2 修订后，会话状态可跨启动恢复，移动端进程被杀不再意�
 7. M5 ⏳（v0.16）：Rust 侧完成——`MessageBody` 图文正文、`sme-media` 图片链路（压缩 / 剥 EXIF / 解压炸弹防御，I12）、`sme-client` 运行时、`sme-ffi` + Swift/Kotlin 绑定生成；iOS/Android 外壳与沙箱审计待 Xcode / Android SDK。
 8. M6 ✅（v0.17）：桌面 TUI 图片内联预览（`ratatui-image`，后台 resize/encode）、`Ctrl+S` 另存为、8MB 附件预算与 `dropped_images` 通知；Linux 本地验证通过，CI desktop 矩阵（ubuntu/macOS/Windows）build + test 全部通过。
 9. M7.1 ✅（v0.19）：TOFU 身份固定 + `FetchIdentity` / `IdentityKeys` + I10；交互式 vodozemac SAS（D28）、verified 持久化与 TUI `/verify` 流程。
-10. v0.20：I9 自动化 + `--terminal-probe` / `--image-demo` + `docs/AUDIT.md`；终端协议真机结果待记录。
+10. v0.20：I9 自动化 + `--terminal-probe` / `--image-demo` + `docs/AUDIT.md`；Windows Terminal 的 Sixel 探测已确认，视觉 demo 与 Kitty/iTerm2/tmux/ssh 待记录。
 11. 下一步：环境就绪后补 M5 移动端外壳与沙箱审计；随后 M7（群聊 / 元数据保护 / 文件与视频）。
 12. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
 

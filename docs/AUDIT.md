@@ -90,6 +90,7 @@ capabilities: [...]
 | Kitty | `Kitty` | 图片清晰、透明/背景正常；不产生临时文件；放大缩小窗口后比例保持 |
 | iTerm2 | `Iterm2` | 同上 |
 | WezTerm | `Iterm2` 或 `Kitty`（取决于能力） | 同上 |
+| Windows Terminal（新版） | `Sixel`（已探测） | 图片清晰、缩放正常；若花屏则记录回退情况 |
 | foot / Konsole / 其他 Sixel 终端 | `Sixel` | 颜色与缩放正常 |
 | tmux（图形穿透未配置） | `Halfblocks` | 不崩溃、无花屏；图片以半块字符显示 |
 | SSH 到远端 | 视终端而定，通常 `Halfblocks` | 不崩溃；Ctrl+S 另存为仍可用 |
@@ -106,6 +107,10 @@ capabilities: [...]
 | 日期 | 平台 | 终端 | 探测协议 | 预览 | 备注 |
 | --- | --- | --- | --- | --- | --- |
 | 2026-10-19 | Linux/WSL2 | `script` PTY（xterm-256color） | `Halfblocks` | 回退正常 | 无图形协议；`--terminal-probe` 输出 Halfblocks |
+| 2026-10-19 | Windows | Windows Terminal | `Sixel` | 待确认 | capabilities: `[Sixel, RectangularOps, CellSize(Some((10, 20)))]`；`--image-demo` 应显示 320×200 渐变+棋盘格，需终端截图确认 |
 | | | Kitty | | | 待真机确认 |
 | | | iTerm2 | | | 待真机确认 |
 | | | tmux / ssh | | | 待真机确认 |
+
+
+> 备注：`--image-demo` 渲染的是代码生成的 320×200 渐变 + 棋盘格测试图，不是任何浏览器页面。若截到的是其他窗口，说明截错窗口了；请直接截终端窗口本身。
