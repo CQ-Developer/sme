@@ -9,6 +9,7 @@
 | [plan.md](plan.md) | 决策记录 D1–D28、不变式 I1–I12、模块划分与里程碑 |
 | [docs/INFRA.md](docs/INFRA.md) | Postgres 18.6 / Valkey 9.1.2 / Caddy 规格、键空间与配额 |
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | 安全目标 G1–G10、对手 A1–A9、残余风险 R1–R14 |
+| [docs/AUDIT.md](docs/AUDIT.md) | I9 全链路金丝雀手动全盘审计、桌面终端图形协议真机检查清单 |
 
 ## 开发
 
@@ -42,6 +43,13 @@ cargo run -p sme-client-tui -- ws://127.0.0.1:8080/ws
 ```
 
 首次联系时，对端身份公钥（Ed25519 + Curve25519）会固定到本地 keystore（TOFU）。之后任何来源观察到不同公钥都会显示告警并阻止发送；当前 TUI 明确标记为「TOFU 未验证」；用 `/verify` 启动交互式 SAS，双方带外比较 7 emoji / 3 个十进制短码后各自 Ctrl+Y 确认，验证通过后 pin 标记为 verified 并跨重启保持。入站首次联系通过只读的 `FetchIdentity` 目录帧获取对端 Ed25519，不消耗一次性 prekey；解除告警目前需要重启后重新获取 prekey（服务端若重新返回已固定公钥则自动确认）。
+
+终端图形能力自检（不连服务端、不读 keystore）：
+
+```bash
+./target/debug/sme-client-tui --terminal-probe  # 打印探测到的协议 / 字体 / capabilities
+./target/debug/sme-client-tui --image-demo     # 用生成的测试图走真实预览管线，Esc 退出
+```
 
 图片通过 `ratatui-image` 渲染：Kitty / iTerm2 / Sixel 走图形协议，探测失败或 tmux/ssh 穿透失败时自动回退 unicode halfblocks。接收端解码前会再次校验 JPEG 格式、实际尺寸与协议声明的尺寸一致（防解压炸弹）。图片只是内存中的消息，不写应用目录；唯一的落盘出口是 `Ctrl+S`（用户输入路径，拒绝应用数据目录与系统临时目录，且不覆盖已有文件）。内存中最多保留 10 条消息、图片合计 ≤8MB；超预算时先丢弃最旧图片并提示「ask the peer to resend」。`cargo test -p sme-client-tui` 覆盖另存为路径规则，`cargo test -p sme-client-core` 覆盖预算淘汰。
 

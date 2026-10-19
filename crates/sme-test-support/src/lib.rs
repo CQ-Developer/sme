@@ -116,6 +116,33 @@ impl ValkeyContainer {
         }
     }
 
+    /// Dump every key and value (including streams) for the I9 plaintext scan.
+    pub async fn dump_all(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        let client = redis::Client::open(self.url.as_str()).map_err(|error| error.to_string())?;
+        let mut connection = client
+            .get_connection_manager()
+            .await
+            .map_err(|error| error.to_string())?;
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg("*")
+            .query_async(&mut connection)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let mut entries = Vec::with_capacity(keys.len());
+        for key in keys {
+            let value: Option<Vec<u8>> = redis::cmd("DUMP")
+                .arg(&key)
+                .query_async(&mut connection)
+                .await
+                .map_err(|error| error.to_string())?;
+            if let Some(value) = value {
+                entries.push((key, value));
+            }
+        }
+        Ok(entries)
+    }
+
     /// Read container logs; the I7 negative case uses this to assert the gateway really refused to start.
     pub fn logs(&self) -> Result<String, String> {
         let output = Command::new("docker")

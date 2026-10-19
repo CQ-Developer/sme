@@ -1,6 +1,6 @@
 # sme — 端到端加密聊天软件 · 规划草案
 
-> 状态：草案 v0.19
+> 状态：草案 v0.20
 > 目标读者：本项目开发者
 >
 > - v0.2：D3 修订为全平台（iOS / Android / Windows / macOS / Linux，含 TUI）；D1、D2、D5、D6、D7、D8 确认。
@@ -21,6 +21,7 @@
 > - v0.17：M6 实现完成——TUI 内联图片预览（`ratatui-image` 11.1，`default-features = false`，resize/encode 在后台线程；接收端解码前复核 JPEG 格式与 2048px 上限）、`Ctrl+S`「另存为」（拒绝应用目录与系统临时目录、不覆盖已有文件）、8MB 图片字节预算（超限先淘汰最旧图片，文本保留；10 条消息上限不变）；`Event::Received` / FFI 事件携带 `dropped_images`；三平台构建说明与限制写入 README；CI 新增 ubuntu / macOS / Windows 的 TUI 构建与测试矩阵，三平台全部通过。
 > - v0.18：M7.1a 完成——TOFU 身份固定（`peer.pin.<account>` 存 keystore，首次固定后永不静默覆盖）、新增只读目录帧 `FetchIdentity` / `IdentityKeys`（不消耗一次性 prekey）、身份变化告警与发送阻止；I10 单测覆盖首次固定、变更不覆盖、入站 pre-key Curve25519 变化与跨启动持久化；E2E 验证重启后 pin 恢复、服务端替换目录密钥触发 `PeerKeyChanged` 并阻止发送。安全码 SAS（M7.1b）待做。
 > - v0.19：M7.1b 完成——交互式 vodozemac SAS（D28）：Start/PublicKey 建立临时 DH，7 emoji / 3 个十进制短码；双方确认后交换绑定双方 Ed25519 + Curve25519 的 MAC，验证通过才把 pin 标记为 verified；SAS 帧只走 Olm 明文，服务端不可见；TUI 支持 `/verify` + Ctrl+Y / Ctrl+G，verified 状态跨重启持久化；新增核心状态机测试与真实网关 E2E。
+> - v0.20：验证补强——I9 全链路金丝雀自动化（客户端 app 目录/退出重启 + Postgres 全表 + Valkey 全键/日志/重启；服务端 stdout/stderr 由 I5 覆盖）；TUI 新增 `--terminal-probe` / `--image-demo` 与 `docs/AUDIT.md` 的终端图形协议真机审计清单。
 
 ## 1. 产品定位（一句话）
 
@@ -240,7 +241,7 @@ Cargo workspace（Rust）
 | I6 | 退出即擦除内存中的 KEK、口令与消息 | 全程 `zeroize`；断言析构顺序（`mlock` / 禁 core dump 为尽力项，非承诺） | 全平台 |
 | I7 | 易失队列组件禁用持久化 | 服务端启动自检 `CONFIG GET save appendonly`，不满足则拒绝启动 | 服务端 |
 | I8 | 易失队列重启后不残留密文 | 写入密文 → 重启组件 → 断言队列为空 | 服务端 |
-| I9 | **全链路金丝雀**：消息不出现在任何磁盘、数据库、日志、转储中 | 发送唯一字符串 → 走完全生命周期（客户端退出/重启、服务端重启、用户库 dump、队列组件快照）→ 全盘 grep 必须为零 | 端到端 |
+| I9 | **全链路金丝雀**：消息不出现在任何磁盘、数据库、日志、转储中 | 发送唯一文本 + 图片 → 客户端退出/重启 → 扫描 app 目录、Postgres 全表、Valkey 全键/日志与重启后快照；服务端输出由 I5 覆盖；真机全盘步骤见 `docs/AUDIT.md` | 端到端 |
 | I10 | 安全码 pin 不被静默改写 | 变更路径必须触发告警；测试断言 pin 变更事件被上报、pin 不被覆盖、发送被阻止（`i10_pin_change.rs` + E2E 重启/替换） | 客户端 |
 | I11 | 落盘的 keystore 必须是密文，且不含任何消息字节 | 读取 keystore 文件，断言其中不含身份私钥明文与实例中出现过的消息字符串；断言无口令时无法解密 | 全平台 |
 | I12 | 发出的图片不含 EXIF / GPS / ICC 元数据 | 单测：对带 GPS 的样例图跑压缩链路，断言输出中不存在 EXIF 段与坐标字节 | 全平台（`sme-media`） |
@@ -271,6 +272,8 @@ Cargo workspace（Rust）
 > M6 状态（v0.17）：完成。Linux 本地构建 / 测试 / TUI 冒烟通过；CI desktop 矩阵在 ubuntu / macOS / Windows 上全部通过（build + test）。运行时图形协议（Kitty / Sixel / iTerm2）与真机平台审计仍需在对应桌面环境手动确认。
 >
 > M7.1 状态（v0.19）：TOFU pin、身份变更告警、I10 与交互式 SAS（D28）全部完成；M7 剩余项为群聊、元数据保护、文件/视频。
+>
+> 验证补强（v0.20）：I9 自动化与终端审计工具/清单完成；真实 Kitty / iTerm2 / Sixel / tmux / ssh 的像素效果仍需按 `docs/AUDIT.md` 在对应终端手动记录。
 
 ## 10. 决策记录
 
@@ -402,8 +405,9 @@ D2 修订后，会话状态可跨启动恢复，移动端进程被杀不再意�
 7. M5 ⏳（v0.16）：Rust 侧完成——`MessageBody` 图文正文、`sme-media` 图片链路（压缩 / 剥 EXIF / 解压炸弹防御，I12）、`sme-client` 运行时、`sme-ffi` + Swift/Kotlin 绑定生成；iOS/Android 外壳与沙箱审计待 Xcode / Android SDK。
 8. M6 ✅（v0.17）：桌面 TUI 图片内联预览（`ratatui-image`，后台 resize/encode）、`Ctrl+S` 另存为、8MB 附件预算与 `dropped_images` 通知；Linux 本地验证通过，CI desktop 矩阵（ubuntu/macOS/Windows）build + test 全部通过。
 9. M7.1 ✅（v0.19）：TOFU 身份固定 + `FetchIdentity` / `IdentityKeys` + I10；交互式 vodozemac SAS（D28）、verified 持久化与 TUI `/verify` 流程。
-10. 下一步：环境就绪后补 M5 移动端外壳与沙箱审计；随后 M7（群聊 / 元数据保护 / 文件与视频）。
-11. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
+10. v0.20：I9 自动化 + `--terminal-probe` / `--image-demo` + `docs/AUDIT.md`；终端协议真机结果待记录。
+11. 下一步：环境就绪后补 M5 移动端外壳与沙箱审计；随后 M7（群聊 / 元数据保护 / 文件与视频）。
+12. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
 
 ## 14. 附录：D4e 验证记录与本地环境
 

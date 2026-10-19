@@ -8,6 +8,12 @@
 //! - `Esc` / `Ctrl+C`: normal exit (`Esc` cancels the save prompt first)
 //! - Auto-lock after 5 minutes idle wipes in-memory plaintext, sessions and the passphrase
 //!
+//! Diagnostics:
+//! - `--terminal-probe`: print the detected image protocol (`Kitty` / `Sixel` / `Iterm2` /
+//!   `Halfblocks`), font size and capabilities; used for the manual terminal audit.
+//! - `--image-demo`: render a generated test pattern with the detected protocol, without
+//!   connecting to a server or touching the keystore.
+//!
 //! Plaintext exists only in the `sme-client-core` buffer and in this UI's render-time
 //! strings. Images are decoded for display; resize/encode runs on a background thread.
 
@@ -89,8 +95,17 @@ struct App {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let server = std::env::args()
-        .nth(1)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--terminal-probe") {
+        return probe_terminal();
+    }
+    if args.iter().any(|arg| arg == "--image-demo") {
+        return run_image_demo().await;
+    }
+
+    let server = args
+        .into_iter()
+        .find(|arg| !arg.starts_with("--"))
         .unwrap_or_else(|| "ws://127.0.0.1:8080/ws".to_string());
     let data_dir = default_data_dir();
     let keystore_path = data_dir.join("keystore.bin");
@@ -99,6 +114,106 @@ async fn main() -> std::io::Result<()> {
     let result = run(&mut terminal, server, data_dir, keystore_path).await;
     ratatui::restore();
     result
+}
+
+/// Print what `ratatui-image` detects for the current terminal (manual audit helper).
+fn probe_terminal() -> std::io::Result<()> {
+    crossterm::terminal::enable_raw_mode()?;
+    let picker = Picker::from_query_stdio();
+    crossterm::terminal::disable_raw_mode()?;
+
+    match picker {
+        Ok(picker) => {
+            let font = picker.font_size();
+            println!("protocol: {:?}", picker.protocol_type());
+            println!("font-size: {}x{}", font.width, font.height);
+            println!("capabilities: {:?}", picker.capabilities());
+        }
+        Err(error) => {
+            println!("detection failed: {error}; runtime fallback is halfblocks");
+        }
+    }
+    Ok(())
+}
+
+async fn run_image_demo() -> std::io::Result<()> {
+    let mut terminal = ratatui::init();
+    let result = image_demo_loop(&mut terminal).await;
+    ratatui::restore();
+    result
+}
+
+/// Render a generated pattern with the real preview pipeline, no network or keystore.
+async fn image_demo_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> std::io::Result<()> {
+    let (resize_tx, encoder_rx) = spawn_encoder_worker();
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    let protocol = format!("{:?}", picker.protocol_type());
+    let image = demo_image();
+    let state = ThreadProtocol::new(resize_tx.clone(), Some(picker.new_resize_protocol(image)));
+
+    let mut app = App {
+        server: String::new(),
+        data_dir: default_data_dir(),
+        keystore_path: PathBuf::new(),
+        password: Zeroizing::new(String::new()),
+        session: None,
+        status: format!(
+            "Terminal image demo · detected protocol: {protocol} · Esc or Ctrl+C exits"
+        ),
+        messages: vec![UiMessage::Notice(
+            "Generated test pattern; this mode never connects to the network or reads the keystore"
+                .to_string(),
+        )],
+        dropped: 0,
+        input: Zeroizing::new(String::new()),
+        peer: None,
+        last_activity: Instant::now(),
+        quit: false,
+        picker,
+        resize_tx,
+        encoder_rx,
+        image: Some(state),
+        save_prompt: None,
+        save_target: None,
+        blocked_peer: None,
+        sas: None,
+    };
+
+    let mut keys = EventStream::new();
+    loop {
+        while let Ok(response) = app.encoder_rx.try_recv() {
+            if let Some(image) = app.image.as_mut() {
+                let _ = image.update_resized_protocol(response);
+            }
+        }
+        terminal.draw(|frame| draw(frame, &mut app))?;
+
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            maybe_key = keys.next() => {
+                if let Some(Ok(TermEvent::Key(key))) = maybe_key
+                    && (key.code == KeyCode::Esc
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)))
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// A colourful pattern with a checkerboard: resizing should preserve the aspect ratio.
+fn demo_image() -> image::DynamicImage {
+    let width = 320;
+    let height = 200;
+    let pixels = image::RgbImage::from_fn(width, height, |x, y| {
+        let red = (x * 255 / width) as u8;
+        let green = (y * 255 / height) as u8;
+        let blue = if (x / 20 + y / 20) % 2 == 0 { 32 } else { 224 };
+        image::Rgb([red, green, blue])
+    });
+    image::DynamicImage::ImageRgb8(pixels)
 }
 
 async fn run(
@@ -969,5 +1084,16 @@ mod draw_tests {
             });
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod demo_tests {
+    use super::*;
+
+    #[test]
+    fn demo_image_has_the_expected_size() {
+        let image = demo_image();
+        assert_eq!((image.width(), image.height()), (320, 200));
     }
 }

@@ -6,6 +6,7 @@
 //! Requires real Postgres (`DATABASE_URL`) and Docker (temporary Valkey containers).
 
 use std::path::Path;
+use std::time::Duration;
 
 use sme_client::{Event, ReceivedKind, Session};
 use sme_proto::MessageBody;
@@ -433,4 +434,162 @@ async fn sas_verification_completes_and_survives_restart() {
         .await
         .expect("alice restarts");
     assert!(alice.is_peer_verified(bob_id));
+}
+
+const I9_TEXT_CANARY: &str = "CANARY-I9-4d2a: text must not reach any disk, database or queue";
+const I9_IMAGE_CANARY: &[u8] =
+    b"CANARY-I9-4d2a: image bytes must not reach any disk, database or queue";
+
+async fn dump_postgres(pool: &sqlx::PgPool) -> String {
+    let mut dump = String::new();
+    for table in ["accounts", "_sqlx_migrations"] {
+        let sql = format!("SELECT to_jsonb(t)::text FROM {table} t");
+        let rows: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .fetch_all(pool)
+            .await
+            .expect("dump table");
+        for (row,) in rows {
+            dump.push_str(&row);
+            dump.push('\n');
+        }
+    }
+    dump
+}
+
+fn assert_no_canary(label: &str, haystack: &[u8], canary: &[u8]) {
+    assert!(
+        !haystack
+            .windows(canary.len())
+            .any(|window| window == canary),
+        "{label} contains the I9 canary"
+    );
+}
+
+fn assert_valkey_clean(entries: &[(String, Vec<u8>)]) {
+    for (key, value) in entries {
+        assert_no_canary("Valkey key", key.as_bytes(), I9_TEXT_CANARY.as_bytes());
+        assert_no_canary("Valkey value", value, I9_TEXT_CANARY.as_bytes());
+        assert_no_canary("Valkey value", value, I9_IMAGE_CANARY);
+    }
+}
+
+/// I9: send a unique text + image canary through the whole lifecycle, then scan the
+/// client app directories, every persistent DB row and every Valkey key/value.
+///
+/// Server stdout/stderr is covered by I5 in `sme-server/tests/invariants.rs`; this test
+/// additionally covers the real client keystores and the shared ephemeral queue.
+#[tokio::test]
+async fn i9_canary_never_reaches_app_dirs_database_or_queue() {
+    let Some((url, valkey)) = start_server().await else {
+        eprintln!("skipping end-to-end test: DATABASE_URL is not set");
+        return;
+    };
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect test database");
+
+    let dir = TestDir::new("i9");
+    let alice_path = dir.join("alice.bin");
+    let bob_path = dir.join("bob.bin");
+
+    let mut alice = Session::connect(&url, &alice_path, PASSWORD)
+        .await
+        .expect("alice connects");
+    let mut bob = Session::connect(&url, &bob_path, PASSWORD)
+        .await
+        .expect("bob connects");
+    let bob_id = bob.account_id();
+
+    bob.upload_prekeys(5).await.unwrap();
+    next_until(&mut bob, |event| {
+        matches!(event, Event::PreKeysUploaded { .. })
+    })
+    .await;
+    alice.fetch_prekey(bob_id).await.unwrap();
+    next_until(&mut alice, |event| {
+        matches!(event, Event::SessionEstablished { .. })
+    })
+    .await;
+
+    alice.send_text(bob_id, I9_TEXT_CANARY).await.unwrap();
+    next_until(&mut bob, |event| {
+        matches!(
+            event,
+            Event::Received { kind: ReceivedKind::Text(text), .. } if text == I9_TEXT_CANARY
+        )
+    })
+    .await;
+
+    let image = MessageBody::Image {
+        width: 2,
+        height: 2,
+        bytes: I9_IMAGE_CANARY.to_vec(),
+    };
+    alice.send_body(bob_id, &image).await.unwrap();
+    next_until(&mut bob, |event| {
+        matches!(
+            event,
+            Event::Received { kind: ReceivedKind::Image { bytes, .. }, .. } if bytes == I9_IMAGE_CANARY
+        )
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Persistent layer: every row of the only two tables I1 permits.
+    let db_dump = dump_postgres(&pool).await;
+    assert_no_canary(
+        "Postgres dump",
+        db_dump.as_bytes(),
+        I9_TEXT_CANARY.as_bytes(),
+    );
+    assert_no_canary("Postgres dump", db_dump.as_bytes(), I9_IMAGE_CANARY);
+
+    // Ephemeral queue and directory state.
+    let entries = valkey.dump_all().await.expect("dump Valkey");
+    assert_valkey_clean(&entries);
+    let queue_logs = valkey.logs().expect("read Valkey logs");
+    assert_no_canary(
+        "Valkey logs",
+        queue_logs.as_bytes(),
+        I9_TEXT_CANARY.as_bytes(),
+    );
+
+    // Client app directories (keystores/config) while the clients are alive.
+    assert_no_plaintext(dir.path(), I9_TEXT_CANARY.as_bytes());
+    assert_no_plaintext(dir.path(), I9_IMAGE_CANARY);
+
+    // Client exit + restart on the same encrypted keystores.
+    drop(alice);
+    drop(bob);
+    let alice = Session::connect(&url, &alice_path, PASSWORD)
+        .await
+        .expect("alice restarts");
+    let _bob = Session::connect(&url, &bob_path, PASSWORD)
+        .await
+        .expect("bob restarts");
+    assert_no_plaintext(dir.path(), I9_TEXT_CANARY.as_bytes());
+    assert_no_plaintext(dir.path(), I9_IMAGE_CANARY);
+
+    // Queue component restart: whatever survived must still contain no plaintext.
+    valkey.restart().await.expect("restart Valkey");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let entries = valkey.dump_all().await.expect("dump Valkey after restart");
+    assert_valkey_clean(&entries);
+    let db_dump = dump_postgres(&pool).await;
+    assert_no_canary(
+        "Postgres dump after restart",
+        db_dump.as_bytes(),
+        I9_TEXT_CANARY.as_bytes(),
+    );
+    assert_no_canary(
+        "Postgres dump after restart",
+        db_dump.as_bytes(),
+        I9_IMAGE_CANARY,
+    );
+
+    drop(alice);
+    pool.close().await;
 }
