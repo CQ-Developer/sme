@@ -23,6 +23,7 @@ image = { version = "0.25.10", default-features = false, features = [
 ] }
 postcard = { version = "1", features = ["alloc"] }
 ratatui = "0.30"
+ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
 redis = { version = "1.7", default-features = false, features = [
     "tokio-comp",
     "connection-manager",

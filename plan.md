@@ -1,6 +1,6 @@
 # sme — 端到端加密聊天软件 · 规划草案
 
-> 状态：草案 v0.6
+> 状态：草案 v0.17
 > 目标读者：本项目开发者
 >
 > - v0.2：D3 修订为全平台（iOS / Android / Windows / macOS / Linux，含 TUI）；D1、D2、D5、D6、D7、D8 确认。
@@ -18,6 +18,7 @@
 > - v0.14：确认终端图片能力——桌面 TUI 用 `ratatui-image` 支持 Kitty / Sixel / iTerm2 内联图片预览，回退 unicode halfblocks，并提供「另存为」（D26）；运行时字符串（含 TUI 文案）全部改英文。
 > - v0.15：M5 进行中——图文消息正文（`MessageBody`，仅在 Olm 明文内，服务端不可见）与 `sme-media` 图片链路（格式白名单 / 解压炸弹防御 / EXIF 方向 / 长边 2048 / JPEG q80-70-60 / ≤1MB）完成，I12 通过；TUI 图片内联预览与「另存为」在 M6 接入。
 > - v0.16：抽出 `sme-client` 无 UI 运行时（TUI 与移动端共用）；`sme-ffi`（uniffi 0.32）导出会话与图片预处理，并可在 CI 生成 Swift/Kotlin 绑定。iOS/Android 外壳与真机沙箱审计需要 Xcode / Android SDK，待环境就绪后再做。
+> - v0.17：M6 实现完成——TUI 内联图片预览（`ratatui-image` 11.1，`default-features = false`，resize/encode 在后台线程；接收端解码前复核 JPEG 格式与 2048px 上限）、`Ctrl+S`「另存为」（拒绝应用目录与系统临时目录、不覆盖已有文件）、8MB 图片字节预算（超限先淘汰最旧图片，文本保留；10 条消息上限不变）；`Event::Received` / FFI 事件携带 `dropped_images`；三平台构建说明与限制写入 README；CI 新增 ubuntu / macOS / Windows 的 TUI 构建与测试矩阵。
 
 ## 1. 产品定位（一句话）
 
@@ -234,6 +235,7 @@ Cargo workspace（Rust）
 - 丢弃消息 ≠ 丢弃解密能力：棘轮状态独立于消息缓冲，仍然连续（见 §3 第 3 条）
 - 送达 ACK 与显示缓冲解耦：即使某条消息因超限未显示，也必须回 D-ack，否则服务端会重复投递
 - **图片受字节预算单独约束**：`ATTACHMENT_BYTES_LIMIT = 8MB`。超预算时优先淘汰最早的**图片**（文本继续保留），界面显示「图片已丢弃，需对方重发」——不可简单地用「10 条」去限制 1MB 级的图片
+- 实现落点：`sme-client-core::ATTACHMENT_BYTES_LIMIT`；`MessageBuffer::push_received` 先执行 10 条上限，再按字节预算淘汰最旧图片，并在 `Action::Received` / `Event::Received` 中返回 `dropped_images`；TUI 显示「… dropped by the 8 MiB attachment budget; ask the peer to resend」提示
 
 ## 9. 里程碑
 
@@ -247,6 +249,8 @@ Cargo workspace（Rust）
 | M5 | 移动端：uniffi + iOS/Android 外壳 + `sme-media` 图片链路（压缩 / 剥离 EXIF / 解压炸弹防御）+ 图文消息正文格式 + 平台加固（防快照） | 沙箱目录审计通过；I12 通过 |
 | M6 | 桌面三平台（Windows/macOS/Linux）TUI 适配、图片内联预览（ratatui-image）与「另存为」、平台审计 | 三平台构建通过；复用 M4 的不变式测试 |
 | M7（后续） | 安全码核对 UI（SAS）、群聊（Megolm/MLS）、元数据保护；**文件与视频**（平台原生编码器，不用 FFmpeg） | — |
+
+> M6 状态（v0.17）：实现完成，Linux 构建 / 测试 / TUI 冒烟通过；CI 的 desktop 矩阵在 ubuntu / macOS / Windows 上构建并测试 TUI。运行时图形协议与真机平台审计仍需在对应桌面环境手动确认。
 
 ## 10. 决策记录
 
@@ -286,7 +290,7 @@ Cargo workspace（Rust）
 
 ### 10.2 待定
 
-无待定项。M4 已完成（v0.12），桌面统一 TUI 见 D4a′ 的 v0.13 修订；下一步 M5。
+无待定项。M6 实现已完成（v0.17），剩余工作是 M5 移动端外壳（等 Android SDK / Mac+Xcode）、macOS/Windows 桌面构建验证，以及 M7（SAS、群聊、文件/视频）。
 
 ## 11. 持久化策略（D11 / D13）
 
@@ -373,8 +377,10 @@ D2 修订后，会话状态可跨启动恢复，移动端进程被杀不再意�
 4. M2 ✅（v0.10）：`sme-proto` 线路协议；axum 网关（注册 / 挑战-签名登录 / 预密钥 / 密文转发 / 内存队列 / D-ack / 单会话顶替）；`sme-client-core` 状态机与 `sme-client-net` WebSocket 传输；端到端测试覆盖离线队列与跨重启恢复。
 5. M3 ✅（v0.11）：Valkey 无状态网关（Stream TTL 24h、D-ack 原子删、D17 HMAC 键名、预密钥 7d、presence 心跳、限流、大消息信号量）；启动自检 I7；I1/I5/I7/I8 不变式测试（含真实 Valkey 重启验证）。
 6. M4 ✅（v0.12）：ratatui 参考客户端（仅文本；`/peer` 切换对端、Ctrl+X 紧急擦除、空闲 5 分钟锁定）；明文缓冲与会话 `Zeroize`；I4 应用目录金丝雀扫描与 I6 类型契约测试；`LocalConfig` 保存账号 ID / 盐 / KDF 参数。
-7. 下一步进 M5：uniffi + iOS/Android 外壳 + `sme-media` 图片链路（压缩 / 剥 EXIF / 解压炸弹防御）+ 平台防快照加固，补齐 I12。
-8. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
+7. M5 ⏳（v0.16）：Rust 侧完成——`MessageBody` 图文正文、`sme-media` 图片链路（压缩 / 剥 EXIF / 解压炸弹防御，I12）、`sme-client` 运行时、`sme-ffi` + Swift/Kotlin 绑定生成；iOS/Android 外壳与沙箱审计待 Xcode / Android SDK。
+8. M6 ⏳（v0.17）：桌面 TUI 图片内联预览（`ratatui-image`，后台 resize/encode）、`Ctrl+S` 另存为、8MB 附件预算与 `dropped_images` 通知；Linux 验证通过，CI 矩阵覆盖 macOS/Windows 构建与单测。
+9. 下一步：环境就绪后补 M5 移动端外壳与沙箱审计、完成 M6 三平台构建验证；随后 M7。
+10. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
 
 ## 14. 附录：D4e 验证记录与本地环境
 
