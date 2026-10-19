@@ -140,6 +140,31 @@ pub enum ClientEvent {
     PeerKeyConfirmed {
         peer: String,
     },
+    SasStarted {
+        peer: String,
+    },
+    SasCode {
+        peer: String,
+        /// Matrix SAS emoji indices (0..=63); map with the Matrix emoji table.
+        emojis: Vec<u8>,
+        /// Three decimal numbers to compare out of band.
+        decimals: Vec<u16>,
+    },
+    SasPeerConfirmed {
+        peer: String,
+    },
+    SasLocalConfirmed {
+        peer: String,
+    },
+    SasVerified {
+        peer: String,
+    },
+    SasFailed {
+        peer: String,
+    },
+    SasCancelled {
+        peer: String,
+    },
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -206,6 +231,33 @@ fn to_ffi_event(event: Event) -> ClientEvent {
             observed_curve25519: observed.as_ref().map(|pin| hex(&pin.curve25519_pub)),
         },
         Event::PeerKeyConfirmed { peer } => ClientEvent::PeerKeyConfirmed {
+            peer: peer.to_base32(),
+        },
+        Event::SasStarted { peer } => ClientEvent::SasStarted {
+            peer: peer.to_base32(),
+        },
+        Event::SasCode {
+            peer,
+            emojis,
+            decimals,
+        } => ClientEvent::SasCode {
+            peer: peer.to_base32(),
+            emojis: emojis.to_vec(),
+            decimals: vec![decimals.0, decimals.1, decimals.2],
+        },
+        Event::SasPeerConfirmed { peer } => ClientEvent::SasPeerConfirmed {
+            peer: peer.to_base32(),
+        },
+        Event::SasLocalConfirmed { peer } => ClientEvent::SasLocalConfirmed {
+            peer: peer.to_base32(),
+        },
+        Event::SasVerified { peer } => ClientEvent::SasVerified {
+            peer: peer.to_base32(),
+        },
+        Event::SasFailed { peer } => ClientEvent::SasFailed {
+            peer: peer.to_base32(),
+        },
+        Event::SasCancelled { peer } => ClientEvent::SasCancelled {
             peer: peer.to_base32(),
         },
     }

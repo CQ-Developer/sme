@@ -44,6 +44,23 @@ enum UiMessage {
     Notice(String),
 }
 
+/// Active interactive SAS verification (M7.1b).
+struct SasUi {
+    peer: AccountId,
+    emojis: [u8; 7],
+    decimals: (u16, u16, u16),
+    local_confirmed: bool,
+    peer_confirmed: bool,
+}
+
+/// Matrix SAS emoji table (index from vodozemac's `emoji_indices`).
+const SAS_EMOJIS: [&str; 64] = [
+    "🐶", "🐱", "🦁", "🐎", "🦄", "🐷", "🐘", "🐰", "🐼", "🐓", "🐧", "🐢", "🐟", "🐙", "🦋", "🌷",
+    "🌳", "🌵", "🍄", "🌏", "🌙", "☁️", "🔥", "🍌", "🍎", "🍓", "🌽", "🍕", "🎂", "❤️", "😀", "🤖",
+    "🎩", "👓", "🔧", "🎅", "👍", "☂️", "⌛", "⏰", "🎁", "💡", "📕", "✏️", "📎", "✂️", "🔒", "🔑",
+    "🔨", "☎️", "🏁", "🚂", "🚲", "✈️", "🚀", "🏆", "⚽", "🎸", "🎺", "🔔", "⚓", "🎧", "📁", "📌",
+];
+
 struct App {
     server: String,
     data_dir: PathBuf,
@@ -66,6 +83,8 @@ struct App {
     save_target: Option<Zeroizing<Vec<u8>>>,
     /// Set after a TOFU pin mismatch; sends to this peer are refused until it is confirmed again.
     blocked_peer: Option<AccountId>,
+    /// Active SAS verification, if any.
+    sas: Option<SasUi>,
 }
 
 #[tokio::main]
@@ -112,6 +131,7 @@ async fn run(
         save_prompt: None,
         save_target: None,
         blocked_peer: None,
+        sas: None,
     };
 
     let mut keys = EventStream::new();
@@ -244,6 +264,8 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
             app.input.pop();
         }
         KeyCode::Char('s') if control => start_save(app),
+        KeyCode::Char('y') if control => confirm_sas(app).await,
+        KeyCode::Char('g') if control => cancel_sas(app).await,
         KeyCode::Char(character) if !control => app.input.push(character),
         _ => {}
     }
@@ -277,6 +299,7 @@ fn clear_plaintext(app: &mut App) {
     app.save_prompt = None;
     app.save_target = None;
     app.blocked_peer = None;
+    app.sas = None;
 }
 
 /// Network loss drops the session (and its plaintext) but keeps the peer selection.
@@ -286,6 +309,7 @@ fn disconnect(app: &mut App, reason: &str) {
     app.image = None;
     app.save_prompt = None;
     app.save_target = None;
+    app.sas = None;
     // Keep `blocked_peer`: an identity alarm must survive a transient disconnect.
     app.status = format!("{reason}; enter the passphrase and press Enter to reconnect");
 }
@@ -317,6 +341,25 @@ async fn send_input(app: &mut App) {
     let text = app.input.trim().to_string();
     app.input.clear();
     if text.is_empty() {
+        return;
+    }
+
+    if text == "/verify" {
+        let Some(peer) = app.peer else {
+            app.status = "Pick a peer first with /peer <account-id>".to_string();
+            return;
+        };
+        if app.sas.is_some() {
+            app.status = "A SAS verification is already in progress; Ctrl+G cancels".to_string();
+            return;
+        }
+        let Some(session) = app.session.as_mut() else {
+            return;
+        };
+        match session.start_sas(peer).await {
+            Ok(()) => app.status = format!("SAS started for {peer}; waiting for the peer"),
+            Err(error) => app.status = format!("SAS start failed: {error}"),
+        }
         return;
     }
 
@@ -381,7 +424,7 @@ fn start_save(app: &mut App) {
             .iter()
             .filter_map(|message| match message.body() {
                 MessageBody::Image { bytes, .. } => Some(bytes.clone()),
-                MessageBody::Text { .. } => None,
+                MessageBody::Text { .. } | MessageBody::Sas(_) => None,
             })
             .last()
     });
@@ -423,6 +466,31 @@ fn save_current_image(app: &mut App) {
             format!("Save failed: {error} (edit the path and press Enter to retry)")
         }
     };
+}
+
+async fn confirm_sas(app: &mut App) {
+    let Some(peer) = app.sas.as_ref().map(|sas| sas.peer) else {
+        app.status = "No SAS verification in progress".to_string();
+        return;
+    };
+    let Some(session) = app.session.as_mut() else {
+        return;
+    };
+    match session.confirm_sas(peer).await {
+        Ok(()) => app.status = "SAS confirmation sent; waiting for the peer".to_string(),
+        Err(error) => app.status = format!("SAS confirm failed: {error}"),
+    }
+}
+
+async fn cancel_sas(app: &mut App) {
+    let Some(peer) = app.sas.as_ref().map(|sas| sas.peer) else {
+        return;
+    };
+    app.sas = None;
+    if let Some(session) = app.session.as_mut() {
+        let _ = session.cancel_sas(peer).await;
+    }
+    app.status = format!("SAS verification with {peer} cancelled");
 }
 
 fn apply_event(app: &mut App, event: Event) {
@@ -485,6 +553,9 @@ fn apply_event(app: &mut App, event: Event) {
             observed,
         } => {
             app.blocked_peer = Some(peer);
+            if app.sas.as_ref().is_some_and(|sas| sas.peer == peer) {
+                app.sas = None;
+            }
             let detail = match observed {
                 Some(observed) => format!(
                     "pinned {} / observed {}",
@@ -514,6 +585,62 @@ fn apply_event(app: &mut App, event: Event) {
                 format!("Identity for {peer} matches the stored pin again"),
             );
             app.status = format!("Identity for {peer} confirmed against the stored pin");
+        }
+        Event::SasStarted { peer } => {
+            app.status = format!("SAS verification with {peer} started; waiting for the peer");
+        }
+        Event::SasCode {
+            peer,
+            emojis,
+            decimals,
+        } => {
+            app.sas = Some(SasUi {
+                peer,
+                emojis,
+                decimals,
+                local_confirmed: false,
+                peer_confirmed: false,
+            });
+            app.status = format!(
+                "Compare the 7 emojis / 3 numbers with {peer}, then Ctrl+Y to confirm (Ctrl+G cancels)"
+            );
+        }
+        Event::SasPeerConfirmed { peer } => {
+            if let Some(sas) = app.sas.as_mut()
+                && sas.peer == peer
+            {
+                sas.peer_confirmed = true;
+            }
+            app.status =
+                format!("Peer {peer} confirmed the code; confirm on your side with Ctrl+Y");
+        }
+        Event::SasLocalConfirmed { peer } => {
+            if let Some(sas) = app.sas.as_mut()
+                && sas.peer == peer
+            {
+                sas.local_confirmed = true;
+            }
+            app.status = format!("Your confirmation is sent; waiting for {peer}");
+        }
+        Event::SasVerified { peer } => {
+            app.sas = None;
+            push_notice(
+                app,
+                format!("SAS verified: the identity of {peer} matches the safety code"),
+            );
+            app.status = format!("Identity of {peer} VERIFIED by SAS");
+        }
+        Event::SasFailed { peer } => {
+            app.sas = None;
+            push_notice(
+                app,
+                format!("SAS verification with {peer} FAILED; do not trust this identity"),
+            );
+            app.status = format!("SAS verification with {peer} failed");
+        }
+        Event::SasCancelled { peer } => {
+            app.sas = None;
+            app.status = format!("SAS verification with {peer} cancelled");
         }
     }
 }
@@ -593,6 +720,9 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     if app.image.is_some() {
         constraints.push(Constraint::Percentage(PREVIEW_PERCENTAGE));
     }
+    if app.sas.is_some() {
+        constraints.push(Constraint::Length(7));
+    }
     constraints.push(Constraint::Length(3));
     constraints.push(Constraint::Length(1));
 
@@ -646,23 +776,64 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         chunks[0],
     );
 
-    let input_chunk = if let Some(protocol) = app.image.as_mut() {
-        let area = chunks[1];
+    let mut chunk = 1;
+    if let Some(protocol) = app.image.as_mut() {
+        let area = chunks[chunk];
         let block = Block::default()
             .borders(Borders::ALL)
             .title("Image preview · Ctrl+S saves as");
         let inner = block.inner(area);
         frame.render_widget(block, area);
         frame.render_stateful_widget(StatefulImage::new(), inner, protocol);
-        2
-    } else {
-        1
-    };
+        chunk += 1;
+    }
+
+    if let Some(sas) = app.sas.as_ref() {
+        let emojis = sas
+            .emojis
+            .iter()
+            .map(|index| SAS_EMOJIS[*index as usize])
+            .collect::<Vec<_>>()
+            .join(" ");
+        let state = if sas.local_confirmed && sas.peer_confirmed {
+            "both sides confirmed; finalizing"
+        } else if sas.local_confirmed {
+            "your confirmation is sent; waiting for the peer"
+        } else if sas.peer_confirmed {
+            "the peer confirmed; press Ctrl+Y on your side"
+        } else {
+            "compare out of band, then press Ctrl+Y"
+        };
+        let lines = vec![
+            Line::from(format!("SAS with {}", sas.peer)),
+            Line::from(emojis),
+            Line::from(format!(
+                "Numbers: {} {} {}",
+                sas.decimals.0, sas.decimals.1, sas.decimals.2
+            )),
+            Line::from(state),
+        ];
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Safety code · Ctrl+Y confirm · Ctrl+G cancel"),
+            ),
+            chunks[chunk],
+        );
+        chunk += 1;
+    }
+    let input_chunk = chunk;
 
     let (input_text, title) = if let Some(path) = app.save_prompt.as_ref() {
         (
             path.as_str(),
             "Save as: Enter confirms · Esc cancels · never the app data or temp dir",
+        )
+    } else if app.sas.is_some() {
+        (
+            app.input.as_str(),
+            "SAS active: Ctrl+Y confirm · Ctrl+G cancel · Enter sends text",
         )
     } else if app.session.is_some() {
         (
@@ -775,6 +946,7 @@ mod draw_tests {
             save_prompt: Some(Zeroizing::new("/home/user/photo.jpg".to_string())),
             save_target: None,
             blocked_peer: None,
+            sas: None,
         }
     }
 
@@ -786,6 +958,15 @@ mod draw_tests {
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
             app.blocked_peer = Some(AccountId::random());
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+            app.sas = Some(SasUi {
+                peer: AccountId::random(),
+                emojis: [0, 1, 2, 3, 4, 5, 6],
+                decimals: (1234, 5678, 9012),
+                local_confirmed: false,
+                peer_confirmed: true,
+            });
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         }
     }

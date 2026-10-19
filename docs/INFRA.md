@@ -204,10 +204,11 @@ Caddy 侧要点：只暴露 `443`（`80` 仅用于 ACME 与跳转）；对 HTTP 
 | 写入方式 | 临时文件 + `rename` 原子替换；权限 `0600` |
 | 本地配置 | `<keystore>.config.json`（`sme-client-store::LocalConfig`）：账号 ID + KDF 盐与参数，不含秘密。注册时提交给服务端的盐/参数取这里；keystore 文件头另有一份自包含的盐（本地 KEK 用），两者都是客户端生成 |
 | 目录 | Linux `~/.local/share/sme/`；macOS `~/Library/Application Support/sme/`；Windows `%APPDATA%\sme\`；iOS Application Support；Android 内部 files 目录 |
+| **安全码 / verified** | 交互式 SAS 的临时私钥只在内存；verified 标记写入 keystore 的 `peer.verified`，不包含安全码本身 |
 | **图片** | 只存在于内存（≤10 条、≤8MB 预算）；**唯一落盘出口是用户显式「另存为」**，写到用户自己选择的位置，应用目录不缓存任何副本 |
 | 不引入 | SQLite、系统 Keychain / Keystore（KEK 来自口令）、任何磁盘缓存 |
 
-条目命名（M1/M2 落地）：`olm.account`（账号 pickle）、`olm.session.<peer>.<session_id>`（会话 pickle，带对端账号便于恢复）；两者都以 KEK 经 `AccountPickle::encrypt` / `SessionPickle::encrypt` 加密后写入，再由 keystore 整体 AEAD 封装。M7.1a 新增 `peer.pin.<account>`（Ed25519 || Curve25519，64 字节），用于 TOFU 身份固定；pin 只写一次，后续只比对不覆盖（I10）。
+条目命名（M1/M2 落地）：`olm.account`（账号 pickle）、`olm.session.<peer>.<session_id>`（会话 pickle，带对端账号便于恢复）；两者都以 KEK 经 `AccountPickle::encrypt` / `SessionPickle::encrypt` 加密后写入，再由 keystore 整体 AEAD 封装。M7.1a 新增 `peer.pin.<account>`（Ed25519 || Curve25519，64 字节），用于 TOFU 身份固定；pin 只写一次，后续只比对不覆盖（I10）。M7.1b 新增 `peer.verified`（换行分隔的账号 ID 列表），记录通过交互式 SAS 核对的 pin；身份变更时自动移除。
 
 ## 7. 图片链路（v1 只支持图片，不支持文件与视频）
 

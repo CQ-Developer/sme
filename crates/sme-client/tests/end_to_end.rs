@@ -350,3 +350,87 @@ async fn tofu_pin_survives_restart_and_detects_a_directory_key_change() {
         "the stored pin must not be overwritten"
     );
 }
+
+/// D28 end-to-end: interactive SAS over the real gateway, then verified state across restart.
+#[tokio::test]
+async fn sas_verification_completes_and_survives_restart() {
+    let Some((url, _valkey)) = start_server().await else {
+        eprintln!("skipping end-to-end test: DATABASE_URL is not set");
+        return;
+    };
+
+    let dir = TestDir::new("sas");
+    let alice_path = dir.join("alice.bin");
+    let bob_path = dir.join("bob.bin");
+
+    let mut alice = Session::connect(&url, &alice_path, PASSWORD)
+        .await
+        .expect("alice connects");
+    let alice_id = alice.account_id();
+    let mut bob = Session::connect(&url, &bob_path, PASSWORD)
+        .await
+        .expect("bob connects");
+    let bob_id = bob.account_id();
+
+    bob.upload_prekeys(5).await.unwrap();
+    next_until(&mut bob, |event| {
+        matches!(event, Event::PreKeysUploaded { .. })
+    })
+    .await;
+    alice.fetch_prekey(bob_id).await.unwrap();
+    next_until(&mut alice, |event| {
+        matches!(event, Event::SessionEstablished { .. })
+    })
+    .await;
+
+    // First contact: Alice pins Bob from the bundle; Bob pins Alice via FetchIdentity.
+    alice.send_text(bob_id, "hello").await.unwrap();
+    next_until(&mut bob, |event| matches!(event, Event::Received { .. })).await;
+    next_until(
+        &mut bob,
+        |event| matches!(event, Event::PeerPinned { peer, .. } if *peer == alice_id),
+    )
+    .await;
+    assert!(alice.peer_pin(bob_id).is_some());
+
+    alice.start_sas(bob_id).await.unwrap();
+    let Event::SasCode {
+        emojis: bob_emojis,
+        decimals: bob_decimals,
+        ..
+    } = next_until(&mut bob, |event| matches!(event, Event::SasCode { .. })).await
+    else {
+        panic!("expected Bob's SAS code");
+    };
+    let Event::SasCode {
+        emojis: alice_emojis,
+        decimals: alice_decimals,
+        ..
+    } = next_until(&mut alice, |event| matches!(event, Event::SasCode { .. })).await
+    else {
+        panic!("expected Alice's SAS code");
+    };
+    assert_eq!(alice_emojis, bob_emojis);
+    assert_eq!(alice_decimals, bob_decimals);
+
+    alice.confirm_sas(bob_id).await.unwrap();
+    next_until(&mut bob, |event| {
+        matches!(event, Event::SasPeerConfirmed { .. })
+    })
+    .await;
+    bob.confirm_sas(alice_id).await.unwrap();
+    next_until(&mut bob, |event| matches!(event, Event::SasVerified { .. })).await;
+    next_until(&mut alice, |event| {
+        matches!(event, Event::SasVerified { .. })
+    })
+    .await;
+    assert!(alice.is_peer_verified(bob_id));
+    assert!(bob.is_peer_verified(alice_id));
+
+    // The verified flag is part of the encrypted keystore and survives a restart.
+    drop(alice);
+    let alice = Session::connect(&url, &alice_path, PASSWORD)
+        .await
+        .expect("alice restarts");
+    assert!(alice.is_peer_verified(bob_id));
+}

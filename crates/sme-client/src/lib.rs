@@ -6,7 +6,7 @@
 //! `sme-client-net` (transport), `sme-client-core` (Olm state machine) and
 //! `sme-client-store` (keystore) into one runtime that exposes [`Event`] and a few operations to the UI.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use sme_client_core::{Action, Client, MessageBuffer, ReceivedMessage};
@@ -131,6 +131,35 @@ pub enum Event {
     PeerKeyConfirmed {
         peer: AccountId,
     },
+    /// A local SAS verification was started; waiting for the peer.
+    SasStarted {
+        peer: AccountId,
+    },
+    /// Both sides derived the code; show it and compare it out of band.
+    /// `emojis` are Matrix SAS indices (0..=63).
+    SasCode {
+        peer: AccountId,
+        emojis: [u8; 7],
+        decimals: (u16, u16, u16),
+    },
+    /// The peer confirmed the code; the local user still has to confirm.
+    SasPeerConfirmed {
+        peer: AccountId,
+    },
+    /// The local user confirmed; waiting for the peer's MAC.
+    SasLocalConfirmed {
+        peer: AccountId,
+    },
+    /// Both MACs verified; the pin is now marked as verified.
+    SasVerified {
+        peer: AccountId,
+    },
+    SasFailed {
+        peer: AccountId,
+    },
+    SasCancelled {
+        peer: AccountId,
+    },
 }
 
 /// A logged-in client session.
@@ -158,7 +187,8 @@ impl Session {
                     .ok_or(SessionError::MissingAccount)?;
                 let sessions = keystore.load_sessions()?;
                 let pins = load_peer_pins(&keystore)?;
-                let client = Client::restore(config.account_id, account, sessions, pins);
+                let verified = load_verified_peers(&keystore)?;
+                let client = Client::restore(config.account_id, account, sessions, pins, verified);
                 (config, client, keystore)
             }
             None => {
@@ -290,6 +320,32 @@ impl Session {
         self.client.peer_pin(peer).copied()
     }
 
+    /// True when the current pin passed an interactive SAS verification.
+    pub fn is_peer_verified(&self, peer: AccountId) -> bool {
+        self.client.is_peer_verified(peer)
+    }
+
+    pub async fn start_sas(&mut self, peer: AccountId) -> Result<(), SessionError> {
+        let actions = self.client.start_sas(peer).map_err(SessionError::Core)?;
+        let events = self.run_actions(actions).await?;
+        self.events.extend(events);
+        Ok(())
+    }
+
+    pub async fn confirm_sas(&mut self, peer: AccountId) -> Result<(), SessionError> {
+        let actions = self.client.confirm_sas(peer).map_err(SessionError::Core)?;
+        let events = self.run_actions(actions).await?;
+        self.events.extend(events);
+        Ok(())
+    }
+
+    pub async fn cancel_sas(&mut self, peer: AccountId) -> Result<(), SessionError> {
+        let actions = self.client.cancel_sas(peer);
+        let events = self.run_actions(actions).await?;
+        self.events.extend(events);
+        Ok(())
+    }
+
     /// Emergency memory wipe: plaintext buffer, sessions and pending events.
     pub fn wipe_memory(&mut self) {
         self.client.wipe();
@@ -330,12 +386,20 @@ impl Session {
             self.keystore
                 .put(format!("peer.pin.{peer}"), pin.to_bytes().to_vec());
         }
+        let verified: Vec<String> = self
+            .client
+            .verified_peers()
+            .map(|peer| peer.to_base32())
+            .collect();
+        self.keystore
+            .put(PEER_VERIFIED_KEY, verified.join("\n").into_bytes());
         self.keystore.save()?;
         Ok(())
     }
 }
 
 const PEER_PIN_PREFIX: &str = "peer.pin.";
+const PEER_VERIFIED_KEY: &str = "peer.verified";
 
 /// Load TOFU pins from the keystore; a malformed record is an error, not a silent reset.
 fn load_peer_pins(keystore: &Keystore) -> Result<BTreeMap<AccountId, PeerPin>, SessionError> {
@@ -353,6 +417,23 @@ fn load_peer_pins(keystore: &Keystore) -> Result<BTreeMap<AccountId, PeerPin>, S
         pins.insert(account, pin);
     }
     Ok(pins)
+}
+
+/// Load the set of peers whose pin passed SAS verification.
+fn load_verified_peers(keystore: &Keystore) -> Result<BTreeSet<AccountId>, SessionError> {
+    let Some(bytes) = keystore.get(PEER_VERIFIED_KEY) else {
+        return Ok(BTreeSet::new());
+    };
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| SessionError::Store(StoreError::Corrupt("bad verified peer list")))?;
+    let mut peers = BTreeSet::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let peer = line.parse::<AccountId>().map_err(|_| {
+            SessionError::Store(StoreError::Corrupt("bad verified peer account id"))
+        })?;
+        peers.insert(peer);
+    }
+    Ok(peers)
 }
 
 fn to_event(action: Action) -> Event {
@@ -381,6 +462,9 @@ fn to_event(action: Action) -> Event {
                     height,
                     bytes,
                 },
+                MessageBody::Sas(_) => {
+                    unreachable!("SAS frames are handled by the client core")
+                }
             },
         },
         Action::DecryptFailed { from, .. } => Event::DecryptFailed { from },
@@ -397,6 +481,21 @@ fn to_event(action: Action) -> Event {
             observed,
         },
         Action::PeerKeyConfirmed { peer } => Event::PeerKeyConfirmed { peer },
+        Action::SasStarted { peer } => Event::SasStarted { peer },
+        Action::SasCode {
+            peer,
+            emojis,
+            decimals,
+        } => Event::SasCode {
+            peer,
+            emojis,
+            decimals,
+        },
+        Action::SasPeerConfirmed { peer } => Event::SasPeerConfirmed { peer },
+        Action::SasLocalConfirmed { peer } => Event::SasLocalConfirmed { peer },
+        Action::SasVerified { peer } => Event::SasVerified { peer },
+        Action::SasFailed { peer } => Event::SasFailed { peer },
+        Action::SasCancelled { peer } => Event::SasCancelled { peer },
         Action::Send(_) | Action::Persist => {
             unreachable!("Send/Persist are handled in run_actions")
         }
@@ -442,6 +541,34 @@ mod tests {
         let pins = load_peer_pins(&keystore).expect("load pins");
         assert_eq!(pins.len(), 1);
         assert_eq!(pins.get(&peer), Some(&pin));
+
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn verified_peer_list_roundtrips_and_rejects_garbage() {
+        let dir = scratch("verified");
+        let path = dir.join("keystore.bin");
+        let password = b"test passphrase";
+        let peer = AccountId::random();
+
+        let mut keystore = Keystore::create(&path, password).expect("create keystore");
+        keystore.put(PEER_VERIFIED_KEY, peer.to_base32().into_bytes());
+        keystore.save().expect("save keystore");
+
+        let keystore = Keystore::open(&path, password).expect("reopen keystore");
+        let verified = load_verified_peers(&keystore).expect("load verified peers");
+        assert_eq!(verified.len(), 1);
+        assert!(verified.contains(&peer));
+
+        let mut keystore = Keystore::open(&path, password).expect("reopen keystore");
+        keystore.put(PEER_VERIFIED_KEY, b"not-an-account".to_vec());
+        keystore.save().expect("save keystore");
+        let keystore = Keystore::open(&path, password).expect("reopen keystore");
+        assert!(matches!(
+            load_verified_peers(&keystore),
+            Err(SessionError::Store(StoreError::Corrupt(_)))
+        ));
 
         std::fs::remove_dir_all(dir).expect("cleanup");
     }

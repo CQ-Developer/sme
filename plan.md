@@ -1,6 +1,6 @@
 # sme — 端到端加密聊天软件 · 规划草案
 
-> 状态：草案 v0.18
+> 状态：草案 v0.19
 > 目标读者：本项目开发者
 >
 > - v0.2：D3 修订为全平台（iOS / Android / Windows / macOS / Linux，含 TUI）；D1、D2、D5、D6、D7、D8 确认。
@@ -20,6 +20,7 @@
 > - v0.16：抽出 `sme-client` 无 UI 运行时（TUI 与移动端共用）；`sme-ffi`（uniffi 0.32）导出会话与图片预处理，并可在 CI 生成 Swift/Kotlin 绑定。iOS/Android 外壳与真机沙箱审计需要 Xcode / Android SDK，待环境就绪后再做。
 > - v0.17：M6 实现完成——TUI 内联图片预览（`ratatui-image` 11.1，`default-features = false`，resize/encode 在后台线程；接收端解码前复核 JPEG 格式与 2048px 上限）、`Ctrl+S`「另存为」（拒绝应用目录与系统临时目录、不覆盖已有文件）、8MB 图片字节预算（超限先淘汰最旧图片，文本保留；10 条消息上限不变）；`Event::Received` / FFI 事件携带 `dropped_images`；三平台构建说明与限制写入 README；CI 新增 ubuntu / macOS / Windows 的 TUI 构建与测试矩阵，三平台全部通过。
 > - v0.18：M7.1a 完成——TOFU 身份固定（`peer.pin.<account>` 存 keystore，首次固定后永不静默覆盖）、新增只读目录帧 `FetchIdentity` / `IdentityKeys`（不消耗一次性 prekey）、身份变化告警与发送阻止；I10 单测覆盖首次固定、变更不覆盖、入站 pre-key Curve25519 变化与跨启动持久化；E2E 验证重启后 pin 恢复、服务端替换目录密钥触发 `PeerKeyChanged` 并阻止发送。安全码 SAS（M7.1b）待做。
+> - v0.19：M7.1b 完成——交互式 vodozemac SAS（D28）：Start/PublicKey 建立临时 DH，7 emoji / 3 个十进制短码；双方确认后交换绑定双方 Ed25519 + Curve25519 的 MAC，验证通过才把 pin 标记为 verified；SAS 帧只走 Olm 明文，服务端不可见；TUI 支持 `/verify` + Ctrl+Y / Ctrl+G，verified 状态跨重启持久化；新增核心状态机测试与真实网关 E2E。
 
 ## 1. 产品定位（一句话）
 
@@ -185,6 +186,7 @@ Cargo workspace（Rust）
 
 - **控制帧**：`Register` / `ChallengeRequest` / `Challenge` / `Login` / `LoginAck` / `UploadPreKeys` / `FetchPreKey` / `PreKeyBundle` / `FetchIdentity` / `IdentityKeys` / `SendAck`（Q-ack）/ `DeliverAck`（D-ack）/ `Error`
 - `FetchIdentity` / `IdentityKeys` 是只读目录查询（Ed25519 + Curve25519，不消耗一次性 prekey），用于入站首次联系时固定对端身份；新分支追加在 `Frame` 末尾，既有分支编号不变。
+- **Olm 明文内的控制消息**：`MessageBody::Sas(SasMessage)` 承载交互式 SAS 的 `Start` / `PublicKey` / `Mac` / `Cancel`，只在 Olm 密文内传输，网关不可见，也不进入聊天缓冲。
 - **消息帧 `Envelope`**：
 
 | 字段 | 说明 |
@@ -215,7 +217,13 @@ Cargo workspace（Rust）
 - **首次联系**：发起方从 `PreKeyBundle` 同时获得 Ed25519 / Curve25519；接收方从 pre-key 消息获得 Curve25519，再通过只读的 `FetchIdentity` 帧取得 Ed25519。两者写入本地 keystore 的 `peer.pin.<account>`（AEAD 密文内，平铺 64 字节：Ed25519 || Curve25519）。
 - **pin 只写一次**：之后任何观察到的身份公钥与 pin 不一致，都**不覆盖 pin**；上报 `PeerKeyChanged`，TUI/FFI 显示告警并阻止向该对端发送。观察来源包括 `PreKeyBundle`、`IdentityKeys` 与入站 pre-key 消息的 Curve25519。匹配时若此前被阻止，上报 `PeerKeyConfirmed`。
 - **入站变化**：已固定对端的 pre-key 消息若使用不同 Curve25519 身份密钥，直接 D-ack 丢弃、不进入 UI 缓冲，并告警。
-- **首次联系窗口**：服务端仍可在此时替换密钥（G7 / A3 的已知残余风险）；pin 让之后的替换可见，但首次联系的 MITM 仍需安全码核对。安全码（SAS，7 emoji / 3 个十进制短码）是 M7.1b，必须显式显示「未验证」直到用户完成核对。
+- **首次联系窗口**：服务端仍可在此时替换密钥（G7 / A3 的已知残余风险）；pin 让之后的替换可见，首次联系的 MITM 由安全码核对关闭。
+- **交互式 SAS（M7.1b，D28）**：
+  1. 任一方 `/verify` 生成临时 Curve25519 `Sas`，把 `Start{public_key}` 放进 Olm 明文发给对端。
+  2. 对端回 `PublicKey{public_key}`；双方做临时 DH，用 `SAS_INFO = "sme-sas-v1"` 派生同一组 7 emoji / 3 个十进制短码。
+  3. 用户在带外比较短码一致后各自按 Ctrl+Y 确认；确认时发送 `Mac{mac}`，MAC 输入是**发送方账号 ID + 按账号 ID 排序的双方账号 ID + Ed25519 + Curve25519**，用 `SAS_MAC_INFO = "sme-sas-mac-v1"` 计算；发送方前缀让两边的 MAC 有方向性，防止反射。
+  4. 双方 MAC 都验证通过后，pin 标记为 verified 并写入 keystore（`peer.verified`）；任一方身份密钥变化都会清除 verified 状态。
+  5. SAS 帧只存在于 Olm 明文内，网关只看到普通信封；同一时间只允许一个 SAS，Ctrl+G 取消。
 - **协议与不变式**：`FetchIdentity` / `IdentityKeys` 只返回 accounts 表里的公钥，不接触消息；I10 单测见 `crates/sme-client-core/tests/i10_pin_change.rs`，端到端见 `crates/sme-client/tests/end_to_end.rs`（重启恢复 + 服务端替换目录密钥）。
 
 ## 7. 可验证的不变式（Invariants）
@@ -258,11 +266,11 @@ Cargo workspace（Rust）
 | M4 | TUI 参考客户端（文本）+ 零消息落盘加固（`zeroize`、紧急擦除、syscall 断言）；图片显示在 M6 接入（D26） | 不变式 I2、I3、I4、I6、I11 测试通过（Linux/macOS/Windows） |
 | M5 | 移动端：uniffi + iOS/Android 外壳 + `sme-media` 图片链路（压缩 / 剥离 EXIF / 解压炸弹防御）+ 图文消息正文格式 + 平台加固（防快照） | 沙箱目录审计通过；I12 通过 |
 | M6 | 桌面三平台（Windows/macOS/Linux）TUI 适配、图片内联预览（ratatui-image）与「另存为」、平台审计 | 三平台构建通过；复用 M4 的不变式测试 |
-| M7（后续） | 安全码核对 UI（SAS）、群聊（Megolm/MLS）、元数据保护；**文件与视频**（平台原生编码器，不用 FFmpeg） | — |
+| M7（后续） | 群聊（Megolm/MLS）、元数据保护；**文件与视频**（平台原生编码器，不用 FFmpeg）；安全码核对已在 M7.1 完成 | — |
 
 > M6 状态（v0.17）：完成。Linux 本地构建 / 测试 / TUI 冒烟通过；CI desktop 矩阵在 ubuntu / macOS / Windows 上全部通过（build + test）。运行时图形协议（Kitty / Sixel / iTerm2）与真机平台审计仍需在对应桌面环境手动确认。
 >
-> M7.1a 状态（v0.18）：TOFU pin、身份变更告警与 I10 完成；M7.1b（SAS 安全码核对）与 M7 其余项待做。
+> M7.1 状态（v0.19）：TOFU pin、身份变更告警、I10 与交互式 SAS（D28）全部完成；M7 剩余项为群聊、元数据保护、文件/视频。
 
 ## 10. 决策记录
 
@@ -299,13 +307,12 @@ Cargo workspace（Rust）
 | **D24** | Argon2id 默认参数 | ✅ OWASP 第一档：`m_cost = 19456 KiB, t_cost = 2, p_cost = 1`；参数随 keystore 头保存，将来可升级并重包裹 |
 | **D25** | sqlx 查询方式 | ✅ 方案 A：运行时 `query_as` + `migrate!`（不需要 sqlx-cli，不提交 `.sqlx`）；M2 迭代快，查询面稳定后再评估切编译期宏。sqlx 0.9 要求 MSRV ≥ 1.94，workspace 已同步 |
 | **D26** | 桌面 TUI 图片显示 | ✅ 用 `ratatui-image` 11.x（`default-features = false`，不带 chafa 本地库）：自动探测 Kitty / iTerm2 / Sixel 图形协议，失败回退 unicode halfblocks（探测顺序由 crate 决定）。Kitty 走 direct 传输（`t=d`），不写临时文件；tmux/ssh 下图形协议可能无法穿透，此时自动退 halfblocks。另提供「另存为」作为无图形终端的出口。图片解码缓冲属 UI 边界，渲染后尽快释放 |
-| **D27** | TOFU 身份固定（v0.18） | ✅ 对端身份公钥首次见到即写入 keystore（`peer.pin.<account>`），之后只比对、不覆盖；不一致时上报 `PeerKeyChanged`、阻止发送，匹配后 `PeerKeyConfirmed`。入站首联通过只读 `FetchIdentity` / `IdentityKeys` 获取 Ed25519（不消耗一次性 prekey）。安全码（SAS）仍按 D6 用 vodozemac，作为 M7.1b。 |
+| **D27** | TOFU 身份固定（v0.18） | ✅ 对端身份公钥首次见到即写入 keystore（`peer.pin.<account>`），之后只比对、不覆盖；不一致时上报 `PeerKeyChanged`、阻止发送，匹配后 `PeerKeyConfirmed`。入站首联通过只读 `FetchIdentity` / `IdentityKeys` 获取 Ed25519（不消耗一次性 prekey）。安全码（SAS）按 D6 / D28 用 vodozemac 的交互式 SAS。 |
+| **D28** | 安全码核验方式（v0.19） | ✅ 交互式 vodozemac SAS：`Start` / `PublicKey` 建立临时 DH，显示 7 emoji / 3 个十进制短码；用户双方确认后交换 MAC（绑定发送方 + 双方账号 ID + Ed25519 + Curve25519，防反射），验证通过才把 pin 标记为 verified；SAS 帧只走 Olm 明文，服务端不可见。 |
 
 ### 10.2 待定
 
-**待决：M7.1b 安全码路线。** 选项 A（推荐）：交互式 vodozemac SAS——双方在线交换临时公钥，得到 7 emoji / 3 个十进制短码，严格符合 D6，但需要新增一条 Olm 明文内的验证消息流程；选项 B：静态安全码——对双方 Ed25519 公钥做带域分隔的哈希并渲染成短码，实现简单、无需同时在线，但相当于修订 D6。
-
-其余无待定项。M6 已完成（v0.17，三平台 CI 通过）；剩余工作还有 M5 移动端外壳（等 Android SDK / Mac+Xcode）与桌面图形协议运行时审计。
+无待定项。M6 已完成（v0.17，三平台 CI 通过）；M7.1（TOFU + SAS）已完成（v0.19）；剩余工作为 M5 移动端外壳（等 Android SDK / Mac+Xcode）、桌面图形协议运行时审计，以及 M7 的群聊、元数据保护与文件/视频。
 
 ## 11. 持久化策略（D11 / D13）
 
@@ -394,8 +401,8 @@ D2 修订后，会话状态可跨启动恢复，移动端进程被杀不再意�
 6. M4 ✅（v0.12）：ratatui 参考客户端（仅文本；`/peer` 切换对端、Ctrl+X 紧急擦除、空闲 5 分钟锁定）；明文缓冲与会话 `Zeroize`；I4 应用目录金丝雀扫描与 I6 类型契约测试；`LocalConfig` 保存账号 ID / 盐 / KDF 参数。
 7. M5 ⏳（v0.16）：Rust 侧完成——`MessageBody` 图文正文、`sme-media` 图片链路（压缩 / 剥 EXIF / 解压炸弹防御，I12）、`sme-client` 运行时、`sme-ffi` + Swift/Kotlin 绑定生成；iOS/Android 外壳与沙箱审计待 Xcode / Android SDK。
 8. M6 ✅（v0.17）：桌面 TUI 图片内联预览（`ratatui-image`，后台 resize/encode）、`Ctrl+S` 另存为、8MB 附件预算与 `dropped_images` 通知；Linux 本地验证通过，CI desktop 矩阵（ubuntu/macOS/Windows）build + test 全部通过。
-9. M7.1a ✅（v0.18）：TOFU 身份固定 + `FetchIdentity` / `IdentityKeys` + I10；M7.1b（SAS）路线待确认。
-10. 下一步：确认 SAS 路线后实现 M7.1b；环境就绪后补 M5 移动端外壳与沙箱审计。
+9. M7.1 ✅（v0.19）：TOFU 身份固定 + `FetchIdentity` / `IdentityKeys` + I10；交互式 vodozemac SAS（D28）、verified 持久化与 TUI `/verify` 流程。
+10. 下一步：环境就绪后补 M5 移动端外壳与沙箱审计；随后 M7（群聊 / 元数据保护 / 文件与视频）。
 11. 工具链与容器环境均已就绪（rustup stable + rustfmt/clippy；Docker 29.8 + Compose v5.6）。
 
 ## 14. 附录：D4e 验证记录与本地环境
